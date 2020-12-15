@@ -42,6 +42,7 @@ namespace Neo.SmartContract
         private static Dictionary<uint, InteropDescriptor> services;
         private readonly long gas_amount;
         private List<NotifyEventArgs> notifications;
+        private List<LogEventArgs> logs;
         private List<IDisposable> disposables;
         private readonly Dictionary<UInt160, int> invocationCounter = new();
         private readonly Dictionary<ExecutionContext, ContractTaskAwaiter> contractTasks = new();
@@ -114,6 +115,7 @@ namespace Neo.SmartContract
         /// The notifications sent during the execution.
         /// </summary>
         public IReadOnlyList<NotifyEventArgs> Notifications => notifications ?? (IReadOnlyList<NotifyEventArgs>)Array.Empty<NotifyEventArgs>();
+        public IReadOnlyList<LogEventArgs> Logs => logs ?? (IReadOnlyList<LogEventArgs>)Array.Empty<LogEventArgs>();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ApplicationEngine"/> class.
