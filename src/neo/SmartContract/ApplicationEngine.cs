@@ -33,6 +33,7 @@ namespace Neo.SmartContract
         private static Dictionary<uint, InteropDescriptor> services;
         private readonly long gas_amount;
         private List<NotifyEventArgs> notifications;
+        private List<LogEventArgs> logs;
         private List<IDisposable> disposables;
         private readonly Dictionary<UInt160, int> invocationCounter = new Dictionary<UInt160, int>();
         private readonly uint exec_fee_factor;
@@ -51,6 +52,7 @@ namespace Neo.SmartContract
         public UInt160 CallingScriptHash => CurrentContext?.GetState<ExecutionContextState>().CallingScriptHash;
         public UInt160 EntryScriptHash => EntryContext?.GetScriptHash();
         public IReadOnlyList<NotifyEventArgs> Notifications => notifications ?? (IReadOnlyList<NotifyEventArgs>)Array.Empty<NotifyEventArgs>();
+        public IReadOnlyList<LogEventArgs> Logs => logs ?? (IReadOnlyList<LogEventArgs>)Array.Empty<LogEventArgs>();
 
         protected ApplicationEngine(TriggerType trigger, IVerifiable container, DataCache snapshot, Block persistingBlock, long gas)
         {
