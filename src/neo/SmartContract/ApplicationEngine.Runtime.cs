@@ -237,7 +237,7 @@ namespace Neo.SmartContract
         {
             if (state.Length > MaxNotificationSize) throw new ArgumentException(null, nameof(state));
             string message = Utility.StrictUTF8.GetString(state);
-            Log?.Invoke(this, new LogEventArgs(ScriptContainer, CurrentScriptHash, message));
+            SendLog(ScriptContainer, CurrentScriptHash, message, CurrentContext.InstructionPointer);
         }
 
         /// <summary>
@@ -253,6 +253,13 @@ namespace Neo.SmartContract
             using BinaryWriter writer = new(ms, Utility.StrictUTF8, true);
             BinarySerializer.Serialize(writer, state, MaxNotificationSize);
             SendNotification(CurrentScriptHash, Utility.StrictUTF8.GetString(eventName), state);
+        }
+        protected internal void SendLog(IVerifiable container, UInt160 hash, string message, int position)
+        {
+            LogEventArgs log = new LogEventArgs(container, hash, message, position);
+            Log?.Invoke(this, log);
+            logs ??= new List<LogEventArgs>();
+            logs.Add(log);
         }
 
         /// <summary>
