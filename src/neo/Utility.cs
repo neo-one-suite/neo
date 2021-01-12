@@ -6,7 +6,6 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Text;
-using System.Threading;
 
 namespace Neo
 {
@@ -42,12 +41,14 @@ namespace Neo
 
             // Working directory
             var file = Path.Combine(Environment.CurrentDirectory, configFile);
-            Console.WriteLine(file);
-            Thread.Sleep(10000);
             if (!File.Exists(file))
             {
                 // EntryPoint folder
-                file = Path.Combine(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location), configFile);
+                try {
+                    file = Path.Combine(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location), configFile);
+                } catch {
+                    // do nothing
+                }
                 if (!File.Exists(file))
                 {
                     // neo.dll folder
