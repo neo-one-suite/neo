@@ -9,7 +9,7 @@ namespace Neo.SmartContract.Manifest
     public class ContractMethodDescriptor : ContractEventDescriptor
     {
         /// <summary>
-        /// Returntype indicates the return type of the method. It can be one of the following values: 
+        /// Returntype indicates the return type of the method. It can be one of the following values:
         ///     Any, Signature, Boolean, Integer, Hash160, Hash256, ByteArray, PublicKey, String, Array, Map, InteropInterface, Void.
         /// </summary>
         public ContractParameterType ReturnType { get; set; }
@@ -57,7 +57,7 @@ namespace Neo.SmartContract.Manifest
             };
             if (string.IsNullOrEmpty(descriptor.Name)) throw new FormatException();
             _ = descriptor.Parameters.ToDictionary(p => p.Name);
-            if (!Enum.IsDefined(descriptor.ReturnType)) throw new FormatException();
+            if (!Enum.IsDefined(typeof(ContractParameterType), descriptor.ReturnType)) throw new FormatException();
             if (descriptor.Offset < 0) throw new FormatException();
             return descriptor;
         }

@@ -293,13 +293,18 @@ namespace Neo.SmartContract
         protected override void OnSysCall(uint method)
         {
             InteropDescriptor descriptor = services[method];
+            Console.WriteLine($"{descriptor.Name}");
             ValidateCallFlags(descriptor);
             AddGas(descriptor.FixedPrice * exec_fee_factor);
             List<object> parameters = descriptor.Parameters.Count > 0
                 ? new List<object>()
                 : null;
             foreach (var pd in descriptor.Parameters)
-                parameters.Add(Convert(Pop(), pd));
+            {
+                StackItem item = Pop();
+                parameters.Add(Convert(item, pd));
+                Console.WriteLine($"Param name: {pd.Name}. Type: {pd.Type.ToString()} Value: {item.ToJson()}.");
+            }
             object returnValue = descriptor.Handler.Invoke(this, parameters?.ToArray());
             if (descriptor.Handler.ReturnType != typeof(void))
                 Push(Convert(returnValue));
@@ -311,7 +316,7 @@ namespace Neo.SmartContract
                 AddGas(exec_fee_factor * OpCodePrices[CurrentContext.CurrentInstruction.OpCode]);
         }
 
-        internal void StepOut()
+        public void StepOut()
         {
             int c = InvocationStack.Count;
             while (State != VMState.HALT && State != VMState.FAULT && InvocationStack.Count >= c)

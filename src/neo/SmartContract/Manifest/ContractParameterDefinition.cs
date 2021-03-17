@@ -13,7 +13,7 @@ namespace Neo.SmartContract.Manifest
         public string Name { get; set; }
 
         /// <summary>
-        /// Type indicates the type of the parameter. It can be one of the following values: 
+        /// Type indicates the type of the parameter. It can be one of the following values:
         ///     Any, Signature, Boolean, Integer, Hash160, Hash256, ByteArray, PublicKey, String, Array, Map, InteropInterface.
         /// </summary>
         public ContractParameterType Type { get; set; }
@@ -44,7 +44,7 @@ namespace Neo.SmartContract.Manifest
             };
             if (string.IsNullOrEmpty(parameter.Name))
                 throw new FormatException();
-            if (!Enum.IsDefined(parameter.Type) || parameter.Type == ContractParameterType.Void)
+            if (!Enum.IsDefined(typeof(ContractParameterType), parameter.Type) || parameter.Type == ContractParameterType.Void)
                 throw new FormatException();
             return parameter;
         }

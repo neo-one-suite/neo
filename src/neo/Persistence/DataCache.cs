@@ -208,7 +208,7 @@ namespace Neo.Persistence
         /// Otherwise, tries to get from internal data with TryGetInternal.
         /// </summary>
         /// <param name="key">Key to be searched.</param>
-        /// <param name="factory">Function that may replace current object stored. 
+        /// <param name="factory">Function that may replace current object stored.
         /// If object already exists the factory passed as parameter will not be used.
         /// </param>
         public StorageItem GetAndChange(StorageKey key, Func<StorageItem> factory = null)

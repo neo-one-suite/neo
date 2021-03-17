@@ -9,6 +9,7 @@ using System.Numerics;
 using Array = Neo.VM.Types.Array;
 using Boolean = Neo.VM.Types.Boolean;
 using Buffer = Neo.VM.Types.Buffer;
+using InternalComparer = Neo.IO.ReferenceEqualityComparer;
 
 namespace Neo.SmartContract
 {
@@ -143,7 +144,7 @@ namespace Neo.SmartContract
 
         public static void Serialize(BinaryWriter writer, StackItem item, uint maxSize)
         {
-            HashSet<CompoundType> serialized = new HashSet<CompoundType>(ReferenceEqualityComparer.Instance);
+            HashSet<CompoundType> serialized = new HashSet<CompoundType>(InternalComparer.Instance);
             Stack<StackItem> unserialized = new Stack<StackItem>();
             unserialized.Push(item);
             while (unserialized.Count > 0)
