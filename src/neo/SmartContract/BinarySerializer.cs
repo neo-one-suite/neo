@@ -9,6 +9,7 @@ using System.Numerics;
 using Array = Neo.VM.Types.Array;
 using Boolean = Neo.VM.Types.Boolean;
 using Buffer = Neo.VM.Types.Buffer;
+using InternalComparer = Neo.IO.ReferenceEqualityComparer;
 
 namespace Neo.SmartContract
 {
