@@ -10,6 +10,7 @@ using System.Numerics;
 using Array = Neo.VM.Types.Array;
 using Boolean = Neo.VM.Types.Boolean;
 using Buffer = Neo.VM.Types.Buffer;
+using InternalComparer = Neo.IO.ReferenceEqualityComparer;
 
 namespace Neo.VM
 {
@@ -281,7 +282,7 @@ namespace Neo.VM
             switch (item)
             {
                 case Array array:
-                    context ??= new HashSet<StackItem>(ReferenceEqualityComparer.Instance);
+                    context ??= new HashSet<StackItem>(InternalComparer.Instance);
                     if (!context.Add(array)) throw new InvalidOperationException();
                     json["value"] = new JArray(array.Select(p => ToJson(p, context)));
                     break;
@@ -296,7 +297,7 @@ namespace Neo.VM
                     json["value"] = integer.GetInteger().ToString();
                     break;
                 case Map map:
-                    context ??= new HashSet<StackItem>(ReferenceEqualityComparer.Instance);
+                    context ??= new HashSet<StackItem>(InternalComparer.Instance);
                     if (!context.Add(map)) throw new InvalidOperationException();
                     json["value"] = new JArray(map.Select(p =>
                     {
