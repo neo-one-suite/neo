@@ -7,14 +7,19 @@ using System.Numerics;
 
 namespace Neo.SmartContract
 {
+    /// <summary>
+    /// Represents the values in contract storage.
+    /// </summary>
     public class StorageItem : ISerializable
     {
         private byte[] value;
         private object cache;
-        public bool IsConstant;
 
-        public int Size => Value.GetVarSize() + sizeof(bool);
+        public int Size => Value.GetVarSize();
 
+        /// <summary>
+        /// The byte array value of the <see cref="StorageItem"/>.
+        /// </summary>
         public byte[] Value
         {
             get
@@ -35,64 +40,95 @@ namespace Neo.SmartContract
             }
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="StorageItem"/> class.
+        /// </summary>
         public StorageItem() { }
 
-        public StorageItem(byte[] value, bool isConstant = false)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="StorageItem"/> class.
+        /// </summary>
+        /// <param name="value">The byte array value of the <see cref="StorageItem"/>.</param>
+        public StorageItem(byte[] value)
         {
             this.value = value;
-            this.IsConstant = isConstant;
         }
 
-        public StorageItem(BigInteger value, bool isConstant = false)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="StorageItem"/> class.
+        /// </summary>
+        /// <param name="value">The integer value of the <see cref="StorageItem"/>.</param>
+        public StorageItem(BigInteger value)
         {
             this.cache = value;
-            this.IsConstant = isConstant;
         }
 
-        public StorageItem(IInteroperable interoperable, bool isConstant = false)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="StorageItem"/> class.
+        /// </summary>
+        /// <param name="interoperable">The <see cref="IInteroperable"/> value of the <see cref="StorageItem"/>.</param>
+        public StorageItem(IInteroperable interoperable)
         {
             this.cache = interoperable;
-            this.IsConstant = isConstant;
         }
 
+        /// <summary>
+        /// Increases the integer value in the store by the specified value.
+        /// </summary>
+        /// <param name="integer">The integer to add.</param>
         public void Add(BigInteger integer)
         {
             Set(this + integer);
         }
 
+        /// <summary>
+        /// Creates a new instance of <see cref="StorageItem"/> with the same value as this instance.
+        /// </summary>
+        /// <returns>The created <see cref="StorageItem"/>.</returns>
         public StorageItem Clone()
         {
             return new StorageItem
             {
-                Value = Value,
-                IsConstant = IsConstant
+                Value = Value
             };
         }
 
         public void Deserialize(BinaryReader reader)
         {
-            Value = reader.ReadVarBytes();
-            IsConstant = reader.ReadBoolean();
+            Value = reader.ReadBytes((int)(reader.BaseStream.Length));
         }
 
+        /// <summary>
+        /// Copies the value of another <see cref="StorageItem"/> instance to this instance.
+        /// </summary>
+        /// <param name="replica">The instance to be copied.</param>
         public void FromReplica(StorageItem replica)
         {
             Value = replica.Value;
-            IsConstant = replica.IsConstant;
         }
 
+        /// <summary>
+        /// Gets an <see cref="IInteroperable"/> from the storage.
+        /// </summary>
+        /// <typeparam name="T">The type of the <see cref="IInteroperable"/>.</typeparam>
+        /// <returns>The <see cref="IInteroperable"/> in the storage.</returns>
         public T GetInteroperable<T>() where T : IInteroperable, new()
         {
             if (cache is null)
             {
                 var interoperable = new T();
-                interoperable.FromStackItem(BinarySerializer.Deserialize(value, ExecutionEngineLimits.Default.MaxStackSize, ExecutionEngineLimits.Default.MaxItemSize));
+                interoperable.FromStackItem(BinarySerializer.Deserialize(value, ExecutionEngineLimits.Default.MaxStackSize));
                 cache = interoperable;
             }
             value = null;
             return (T)cache;
         }
 
+        /// <summary>
+        /// Gets a list of <see cref="ISerializable"/> from the storage.
+        /// </summary>
+        /// <typeparam name="T">The type of the <see cref="ISerializable"/>.</typeparam>
+        /// <returns>The list of the <see cref="ISerializable"/>.</returns>
         public List<T> GetSerializableList<T>() where T : ISerializable, new()
         {
             cache ??= new List<T>(value.AsSerializableArray<T>());
@@ -102,10 +138,13 @@ namespace Neo.SmartContract
 
         public void Serialize(BinaryWriter writer)
         {
-            writer.WriteVarBytes(Value);
-            writer.Write(IsConstant);
+            writer.Write(Value);
         }
 
+        /// <summary>
+        /// Sets the integer value of the storage.
+        /// </summary>
+        /// <param name="integer">The integer value to set.</param>
         public void Set(BigInteger integer)
         {
             cache = integer;

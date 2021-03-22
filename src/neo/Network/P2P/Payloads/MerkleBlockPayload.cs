@@ -1,51 +1,72 @@
 using Neo.Cryptography;
 using Neo.IO;
+using System;
 using System.Collections;
 using System.IO;
 using System.Linq;
 
 namespace Neo.Network.P2P.Payloads
 {
-    public class MerkleBlockPayload : BlockBase
+    /// <summary>
+    /// Represents a block that is filtered by a <see cref="BloomFilter"/>.
+    /// </summary>
+    public class MerkleBlockPayload : ISerializable
     {
-        public int ContentCount;
+        /// <summary>
+        /// The header of the block.
+        /// </summary>
+        public Header Header;
+
+        /// <summary>
+        /// The number of the transactions in the block.
+        /// </summary>
+        public int TxCount;
+
+        /// <summary>
+        /// The nodes of the transactions hash tree.
+        /// </summary>
         public UInt256[] Hashes;
+
+        /// <summary>
+        /// The data in the <see cref="BloomFilter"/> that filtered the block.
+        /// </summary>
         public byte[] Flags;
 
-        public override int Size => base.Size + sizeof(int) + Hashes.GetVarSize() + Flags.GetVarSize();
+        public int Size => Header.Size + sizeof(int) + Hashes.GetVarSize() + Flags.GetVarSize();
 
+        /// <summary>
+        /// Creates a new instance of the <see cref="MerkleBlockPayload"/> class.
+        /// </summary>
+        /// <param name="block">The original block.</param>
+        /// <param name="flags">The data in the <see cref="BloomFilter"/> that filtered the block.</param>
+        /// <returns>The created payload.</returns>
         public static MerkleBlockPayload Create(Block block, BitArray flags)
         {
-            MerkleTree tree = new MerkleTree(block.Transactions.Select(p => p.Hash).Prepend(block.ConsensusData.Hash).ToArray());
+            MerkleTree tree = new(block.Transactions.Select(p => p.Hash).ToArray());
+            tree.Trim(flags);
             byte[] buffer = new byte[(flags.Length + 7) / 8];
             flags.CopyTo(buffer, 0);
             return new MerkleBlockPayload
             {
-                Version = block.Version,
-                PrevHash = block.PrevHash,
-                MerkleRoot = block.MerkleRoot,
-                Timestamp = block.Timestamp,
-                Index = block.Index,
-                NextConsensus = block.NextConsensus,
-                Witness = block.Witness,
-                ContentCount = block.Transactions.Length + 1,
+                Header = block.Header,
+                TxCount = block.Transactions.Length,
                 Hashes = tree.ToHashArray(),
                 Flags = buffer
             };
         }
 
-        public override void Deserialize(BinaryReader reader)
+        public void Deserialize(BinaryReader reader)
         {
-            base.Deserialize(reader);
-            ContentCount = (int)reader.ReadVarInt(Block.MaxTransactionsPerBlock + 1);
-            Hashes = reader.ReadSerializableArray<UInt256>(ContentCount);
-            Flags = reader.ReadVarBytes((ContentCount + 7) / 8);
+            Header = reader.ReadSerializable<Header>();
+            TxCount = (int)reader.ReadVarInt(ushort.MaxValue);
+            Hashes = reader.ReadSerializableArray<UInt256>(TxCount);
+            Flags = reader.ReadVarBytes((Math.Max(TxCount, 1) + 7) / 8);
         }
 
-        public override void Serialize(BinaryWriter writer)
+        public void Serialize(BinaryWriter writer)
         {
-            base.Serialize(writer);
-            writer.WriteVarInt(ContentCount);
+            writer.Write(Header);
+            writer.WriteVarInt(TxCount);
             writer.Write(Hashes);
             writer.WriteVarBytes(Flags);
         }

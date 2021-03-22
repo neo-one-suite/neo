@@ -6,32 +6,49 @@ using System;
 
 namespace Neo.Wallets
 {
+    /// <summary>
+    /// A helper class related to wallets.
+    /// </summary>
     public static class Helper
     {
-        public static byte[] Sign(this IVerifiable verifiable, KeyPair key)
-        {
-            return Sign(verifiable, key, ProtocolSettings.Default.Magic);
-        }
-
+        /// <summary>
+        /// Signs an <see cref="IVerifiable"/> with the specified private key.
+        /// </summary>
+        /// <param name="verifiable">The <see cref="IVerifiable"/> to sign.</param>
+        /// <param name="key">The private key to be used.</param>
+        /// <param name="magic">The magic number of the NEO network.</param>
+        /// <returns>The signature for the <see cref="IVerifiable"/>.</returns>
         public static byte[] Sign(this IVerifiable verifiable, KeyPair key, uint magic)
         {
-            return Crypto.Sign(verifiable.GetHashData(magic), key.PrivateKey, key.PublicKey.EncodePoint(false)[1..]);
+            return Crypto.Sign(verifiable.GetSignData(magic), key.PrivateKey, key.PublicKey.EncodePoint(false)[1..]);
         }
 
-        public static string ToAddress(this UInt160 scriptHash)
+        /// <summary>
+        /// Converts the specified script hash to an address.
+        /// </summary>
+        /// <param name="scriptHash">The script hash to convert.</param>
+        /// <param name="version">The address version.</param>
+        /// <returns>The converted address.</returns>
+        public static string ToAddress(this UInt160 scriptHash, byte version)
         {
             Span<byte> data = stackalloc byte[21];
-            data[0] = ProtocolSettings.Default.AddressVersion;
+            data[0] = version;
             scriptHash.ToArray().CopyTo(data[1..]);
             return Base58.Base58CheckEncode(data);
         }
 
-        public static UInt160 ToScriptHash(this string address)
+        /// <summary>
+        /// Converts the specified address to a script hash.
+        /// </summary>
+        /// <param name="address">The address to convert.</param>
+        /// <param name="version">The address version.</param>
+        /// <returns>The converted script hash.</returns>
+        public static UInt160 ToScriptHash(this string address, byte version)
         {
             byte[] data = address.Base58CheckDecode();
             if (data.Length != 21)
                 throw new FormatException();
-            if (data[0] != ProtocolSettings.Default.AddressVersion)
+            if (data[0] != version)
                 throw new FormatException();
             return new UInt160(data.AsSpan(1));
         }

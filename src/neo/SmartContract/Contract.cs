@@ -1,30 +1,30 @@
 using Neo.Cryptography.ECC;
 using Neo.VM;
-using Neo.Wallets;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace Neo.SmartContract
 {
+    /// <summary>
+    /// Represents a contract that can be invoked.
+    /// </summary>
     public class Contract
     {
+        /// <summary>
+        /// The script of the contract.
+        /// </summary>
         public byte[] Script;
+
+        /// <summary>
+        /// The parameters of the contract.
+        /// </summary>
         public ContractParameterType[] ParameterList;
 
-        private string _address;
-        public string Address
-        {
-            get
-            {
-                if (_address == null)
-                {
-                    _address = ScriptHash.ToAddress();
-                }
-                return _address;
-            }
-        }
-
         private UInt160 _scriptHash;
+        /// <summary>
+        /// The hash of the contract.
+        /// </summary>
         public virtual UInt160 ScriptHash
         {
             get
@@ -37,6 +37,12 @@ namespace Neo.SmartContract
             }
         }
 
+        /// <summary>
+        /// Creates a new instance of the <see cref="Contract"/> class.
+        /// </summary>
+        /// <param name="parameterList">The parameters of the contract.</param>
+        /// <param name="redeemScript">The script of the contract.</param>
+        /// <returns>The created contract.</returns>
         public static Contract Create(ContractParameterType[] parameterList, byte[] redeemScript)
         {
             return new Contract
@@ -47,9 +53,11 @@ namespace Neo.SmartContract
         }
 
         /// <summary>
-        /// Construct special Contract with empty Script, will get the Script with scriptHash from blockchain when doing the Verify
-        /// verification = snapshot.Contracts.TryGet(hashes[i])?.Script;
+        /// Constructs a special contract with empty script, will get the script with scriptHash from blockchain when doing the verification.
         /// </summary>
+        /// <param name="scriptHash">The hash of the contract.</param>
+        /// <param name="parameterList">The parameters of the contract.</param>
+        /// <returns>The created contract.</returns>
         public static Contract Create(UInt160 scriptHash, params ContractParameterType[] parameterList)
         {
             return new Contract
@@ -60,7 +68,13 @@ namespace Neo.SmartContract
             };
         }
 
-        public static Contract CreateMultiSigContract(int m, params ECPoint[] publicKeys)
+        /// <summary>
+        /// Creates a multi-sig contract.
+        /// </summary>
+        /// <param name="m">The minimum number of correct signatures that need to be provided in order for the verification to pass.</param>
+        /// <param name="publicKeys">The public keys of the contract.</param>
+        /// <returns>The created contract.</returns>
+        public static Contract CreateMultiSigContract(int m, IReadOnlyCollection<ECPoint> publicKeys)
         {
             return new Contract
             {
@@ -69,24 +83,32 @@ namespace Neo.SmartContract
             };
         }
 
-        public static byte[] CreateMultiSigRedeemScript(int m, params ECPoint[] publicKeys)
+        /// <summary>
+        /// Creates the script of multi-sig contract.
+        /// </summary>
+        /// <param name="m">The minimum number of correct signatures that need to be provided in order for the verification to pass.</param>
+        /// <param name="publicKeys">The public keys of the contract.</param>
+        /// <returns>The created script.</returns>
+        public static byte[] CreateMultiSigRedeemScript(int m, IReadOnlyCollection<ECPoint> publicKeys)
         {
-            if (!(1 <= m && m <= publicKeys.Length && publicKeys.Length <= 1024))
+            if (!(1 <= m && m <= publicKeys.Count && publicKeys.Count <= 1024))
                 throw new ArgumentException();
-            using (ScriptBuilder sb = new ScriptBuilder())
+            using ScriptBuilder sb = new();
+            sb.EmitPush(m);
+            foreach (ECPoint publicKey in publicKeys.OrderBy(p => p))
             {
-                sb.EmitPush(m);
-                foreach (ECPoint publicKey in publicKeys.OrderBy(p => p))
-                {
-                    sb.EmitPush(publicKey.EncodePoint(true));
-                }
-                sb.EmitPush(publicKeys.Length);
-                sb.Emit(OpCode.PUSHNULL);
-                sb.EmitSysCall(ApplicationEngine.Neo_Crypto_CheckMultisigWithECDsaSecp256r1);
-                return sb.ToArray();
+                sb.EmitPush(publicKey.EncodePoint(true));
             }
+            sb.EmitPush(publicKeys.Count);
+            sb.EmitSysCall(ApplicationEngine.Neo_Crypto_CheckMultisig);
+            return sb.ToArray();
         }
 
+        /// <summary>
+        /// Creates a signature contract.
+        /// </summary>
+        /// <param name="publicKey">The public key of the contract.</param>
+        /// <returns>The created contract.</returns>
         public static Contract CreateSignatureContract(ECPoint publicKey)
         {
             return new Contract
@@ -96,20 +118,27 @@ namespace Neo.SmartContract
             };
         }
 
+        /// <summary>
+        /// Creates the script of signature contract.
+        /// </summary>
+        /// <param name="publicKey">The public key of the contract.</param>
+        /// <returns>The created script.</returns>
         public static byte[] CreateSignatureRedeemScript(ECPoint publicKey)
         {
-            using (ScriptBuilder sb = new ScriptBuilder())
-            {
-                sb.EmitPush(publicKey.EncodePoint(true));
-                sb.Emit(OpCode.PUSHNULL);
-                sb.EmitSysCall(ApplicationEngine.Neo_Crypto_VerifyWithECDsaSecp256r1);
-                return sb.ToArray();
-            }
+            using ScriptBuilder sb = new();
+            sb.EmitPush(publicKey.EncodePoint(true));
+            sb.EmitSysCall(ApplicationEngine.Neo_Crypto_CheckSig);
+            return sb.ToArray();
         }
 
-        public static UInt160 GetBFTAddress(ECPoint[] pubkeys)
+        /// <summary>
+        /// Gets the BFT address for the specified public keys.
+        /// </summary>
+        /// <param name="pubkeys">The public keys to be used.</param>
+        /// <returns>The BFT address.</returns>
+        public static UInt160 GetBFTAddress(IReadOnlyCollection<ECPoint> pubkeys)
         {
-            return CreateMultiSigRedeemScript(pubkeys.Length - (pubkeys.Length - 1) / 3, pubkeys).ToScriptHash();
+            return CreateMultiSigRedeemScript(pubkeys.Count - (pubkeys.Count - 1) / 3, pubkeys).ToScriptHash();
         }
     }
 }

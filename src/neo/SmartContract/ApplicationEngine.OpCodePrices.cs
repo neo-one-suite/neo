@@ -5,6 +5,9 @@ namespace Neo.SmartContract
 {
     partial class ApplicationEngine
     {
+        /// <summary>
+        /// The prices of all the opcodes.
+        /// </summary>
         public static readonly IReadOnlyDictionary<OpCode, long> OpCodePrices = new Dictionary<OpCode, long>
         {
             [OpCode.PUSHINT8] = 1 << 0,
@@ -156,6 +159,8 @@ namespace Neo.SmartContract
             [OpCode.MUL] = 1 << 3,
             [OpCode.DIV] = 1 << 3,
             [OpCode.MOD] = 1 << 3,
+            [OpCode.POW] = 1 << 6,
+            [OpCode.SQRT] = 1 << 11,
             [OpCode.SHL] = 1 << 3,
             [OpCode.SHR] = 1 << 3,
             [OpCode.NOT] = 1 << 2,
@@ -171,8 +176,8 @@ namespace Neo.SmartContract
             [OpCode.MIN] = 1 << 3,
             [OpCode.MAX] = 1 << 3,
             [OpCode.WITHIN] = 1 << 3,
-            [OpCode.PACK] = 1 << 9,
-            [OpCode.UNPACK] = 1 << 9,
+            [OpCode.PACK] = 1 << 11,
+            [OpCode.UNPACK] = 1 << 11,
             [OpCode.NEWARRAY0] = 1 << 4,
             [OpCode.NEWARRAY] = 1 << 9,
             [OpCode.NEWARRAY_T] = 1 << 9,
@@ -192,7 +197,7 @@ namespace Neo.SmartContract
             [OpCode.POPITEM] = 1 << 4,
             [OpCode.ISNULL] = 1 << 1,
             [OpCode.ISTYPE] = 1 << 1,
-            [OpCode.CONVERT] = 1 << 11,
+            [OpCode.CONVERT] = 1 << 13,
         };
     }
 }

@@ -1,99 +1,165 @@
 using Neo.IO;
 using Neo.SmartContract.Manifest;
 using Neo.VM;
-using Neo.VM.Types;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
 using System.Reflection;
-using Array = Neo.VM.Types.Array;
 
 namespace Neo.SmartContract.Native
 {
+    /// <summary>
+    /// The base class of all native contracts.
+    /// </summary>
     public abstract class NativeContract
     {
-        private static readonly List<NativeContract> contractsList = new List<NativeContract>();
-        private static readonly Dictionary<int, NativeContract> contractsIdDictionary = new Dictionary<int, NativeContract>();
-        private static readonly Dictionary<UInt160, NativeContract> contractsHashDictionary = new Dictionary<UInt160, NativeContract>();
-        private readonly Dictionary<(string, int), ContractMethodMetadata> methods = new Dictionary<(string, int), ContractMethodMetadata>();
+        private static readonly List<NativeContract> contractsList = new();
+        private static readonly Dictionary<UInt160, NativeContract> contractsDictionary = new();
+        private readonly Dictionary<int, ContractMethodMetadata> methods = new();
         private static int id_counter = 0;
 
         #region Named Native Contracts
-        public static ContractManagement ContractManagement { get; } = new ContractManagement();
-        public static LedgerContract Ledger { get; } = new LedgerContract();
-        public static NeoToken NEO { get; } = new NeoToken();
-        public static GasToken GAS { get; } = new GasToken();
-        public static PolicyContract Policy { get; } = new PolicyContract();
-        public static RoleManagement RoleManagement { get; } = new RoleManagement();
-        public static OracleContract Oracle { get; } = new OracleContract();
-        public static NameService NameService { get; } = new NameService();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="Native.ContractManagement"/> class.
+        /// </summary>
+        public static ContractManagement ContractManagement { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="Native.StdLib"/> class.
+        /// </summary>
+        public static StdLib StdLib { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="Native.CryptoLib"/> class.
+        /// </summary>
+        public static CryptoLib CryptoLib { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="LedgerContract"/> class.
+        /// </summary>
+        public static LedgerContract Ledger { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="NeoToken"/> class.
+        /// </summary>
+        public static NeoToken NEO { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="GasToken"/> class.
+        /// </summary>
+        public static GasToken GAS { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="PolicyContract"/> class.
+        /// </summary>
+        public static PolicyContract Policy { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="Native.RoleManagement"/> class.
+        /// </summary>
+        public static RoleManagement RoleManagement { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="OracleContract"/> class.
+        /// </summary>
+        public static OracleContract Oracle { get; } = new();
+
+        /// <summary>
+        /// Gets the instance of the <see cref="Native.NameService"/> class.
+        /// </summary>
+        public static NameService NameService { get; } = new();
+
         #endregion
 
+        /// <summary>
+        /// Gets all native contracts.
+        /// </summary>
         public static IReadOnlyCollection<NativeContract> Contracts { get; } = contractsList;
-        public string Name => GetType().Name;
-        public NefFile Nef { get; }
-        public byte[] Script => Nef.Script;
-        public UInt160 Hash { get; }
-        public int Id { get; }
-        public ContractManifest Manifest { get; }
-        public uint ActiveBlockIndex { get; }
 
+        /// <summary>
+        /// The name of the native contract.
+        /// </summary>
+        public string Name => GetType().Name;
+
+        /// <summary>
+        /// The nef of the native contract.
+        /// </summary>
+        public NefFile Nef { get; }
+
+        /// <summary>
+        /// The hash of the native contract.
+        /// </summary>
+        public UInt160 Hash { get; }
+
+        /// <summary>
+        /// The id of the native contract.
+        /// </summary>
+        public int Id { get; } = --id_counter;
+
+        /// <summary>
+        /// The manifest of the native contract.
+        /// </summary>
+        public ContractManifest Manifest { get; }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NativeContract"/> class.
+        /// </summary>
         protected NativeContract()
         {
-            this.Id = --id_counter;
-            byte[] script;
-            using (ScriptBuilder sb = new ScriptBuilder())
+            List<ContractMethodMetadata> descriptors = new();
+            foreach (MemberInfo member in GetType().GetMembers(BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public))
             {
-                sb.EmitPush(Id);
-                sb.EmitSysCall(ApplicationEngine.System_Contract_CallNative);
+                ContractMethodAttribute attribute = member.GetCustomAttribute<ContractMethodAttribute>();
+                if (attribute is null) continue;
+                descriptors.Add(new ContractMethodMetadata(member, attribute));
+            }
+            descriptors = descriptors.OrderBy(p => p.Name).ThenBy(p => p.Parameters.Length).ToList();
+            byte[] script;
+            using (ScriptBuilder sb = new())
+            {
+                foreach (ContractMethodMetadata method in descriptors)
+                {
+                    method.Descriptor.Offset = sb.Length;
+                    sb.EmitPush(0); //version
+                    methods.Add(sb.Length, method);
+                    sb.EmitSysCall(ApplicationEngine.System_Contract_CallNative);
+                    sb.Emit(OpCode.RET);
+                }
                 script = sb.ToArray();
             }
             this.Nef = new NefFile
             {
                 Compiler = "neo-core-v3.0",
-                Tokens = System.Array.Empty<MethodToken>(),
+                Tokens = Array.Empty<MethodToken>(),
                 Script = script
             };
             this.Nef.CheckSum = NefFile.ComputeChecksum(Nef);
-            this.Hash = Helper.GetContractHash(UInt160.Zero, this.Nef.CheckSum, Name);
-            List<ContractMethodDescriptor> descriptors = new List<ContractMethodDescriptor>();
-            foreach (MemberInfo member in GetType().GetMembers(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
-            {
-                ContractMethodAttribute attribute = member.GetCustomAttribute<ContractMethodAttribute>();
-                if (attribute is null) continue;
-                ContractMethodMetadata metadata = new ContractMethodMetadata(member, attribute);
-                descriptors.Add(new ContractMethodDescriptor
-                {
-                    Name = metadata.Name,
-                    ReturnType = ToParameterType(metadata.Handler.ReturnType),
-                    Parameters = metadata.Parameters.Select(p => new ContractParameterDefinition { Type = ToParameterType(p.Type), Name = p.Name }).ToArray(),
-                    Safe = (attribute.RequiredCallFlags & ~CallFlags.ReadOnly) == 0
-                });
-                methods.Add((metadata.Name, metadata.Parameters.Length), metadata);
-            }
+            this.Hash = Helper.GetContractHash(UInt160.Zero, 0, Name);
             this.Manifest = new ContractManifest
             {
                 Name = Name,
-                Groups = System.Array.Empty<ContractGroup>(),
-                SupportedStandards = System.Array.Empty<string>(),
+                Groups = Array.Empty<ContractGroup>(),
+                SupportedStandards = Array.Empty<string>(),
                 Abi = new ContractAbi()
                 {
-                    Events = System.Array.Empty<ContractEventDescriptor>(),
-                    Methods = descriptors.OrderBy(p => p.Name).ThenBy(p => p.Parameters.Length).ToArray()
+                    Events = Array.Empty<ContractEventDescriptor>(),
+                    Methods = descriptors.Select(p => p.Descriptor).ToArray()
                 },
                 Permissions = new[] { ContractPermission.DefaultPermission },
                 Trusts = WildcardContainer<UInt160>.Create(),
                 Extra = null
             };
-            if (ProtocolSettings.Default.NativeActivations.TryGetValue(Name, out uint activationIndex))
-                this.ActiveBlockIndex = activationIndex;
             contractsList.Add(this);
-            contractsIdDictionary.Add(Id, this);
-            contractsHashDictionary.Add(Hash, this);
+            contractsDictionary.Add(Hash, this);
         }
 
-        protected bool CheckCommittee(ApplicationEngine engine)
+        /// <summary>
+        /// Checks whether the committee has witnessed the current transaction.
+        /// </summary>
+        /// <param name="engine">The <see cref="ApplicationEngine"/> that is executing the contract.</param>
+        /// <returns><see langword="true"/> if the committee has witnessed the current transaction; otherwise, <see langword="false"/>.</returns>
+        protected static bool CheckCommittee(ApplicationEngine engine)
         {
             UInt160 committeeMultiSigAddr = NEO.GetCommitteeAddress(engine.Snapshot);
             return engine.CheckWitnessInternal(committeeMultiSigAddr);
@@ -104,95 +170,74 @@ namespace Neo.SmartContract.Native
             return new KeyBuilder(Id, prefix);
         }
 
+        /// <summary>
+        /// Gets the native contract with the specified hash.
+        /// </summary>
+        /// <param name="hash">The hash of the native contract.</param>
+        /// <returns>The native contract with the specified hash.</returns>
         public static NativeContract GetContract(UInt160 hash)
         {
-            contractsHashDictionary.TryGetValue(hash, out var contract);
+            contractsDictionary.TryGetValue(hash, out var contract);
             return contract;
         }
 
-        public static NativeContract GetContract(int id)
+        internal async void Invoke(ApplicationEngine engine, byte version)
         {
-            contractsIdDictionary.TryGetValue(id, out var contract);
-            return contract;
-        }
-
-        internal void Invoke(ApplicationEngine engine)
-        {
-            if (!engine.CurrentScriptHash.Equals(Hash))
-                throw new InvalidOperationException("It is not allowed to use Neo.Native.Call directly to call native contracts. System.Contract.Call should be used.");
-            ExecutionContext context = engine.CurrentContext;
-            string operation = context.EvaluationStack.Pop().GetString();
-            ContractMethodMetadata method = methods[(operation, context.EvaluationStack.Count)];
-            ExecutionContextState state = context.GetState<ExecutionContextState>();
-            if (!state.CallFlags.HasFlag(method.RequiredCallFlags))
-                throw new InvalidOperationException($"Cannot call this method with the flag {state.CallFlags}.");
-            engine.AddGas(method.Price);
-            List<object> parameters = new List<object>();
-            if (method.NeedApplicationEngine) parameters.Add(engine);
-            if (method.NeedSnapshot) parameters.Add(engine.Snapshot);
-            for (int i = 0; i < method.Parameters.Length; i++)
-                parameters.Add(engine.Convert(context.EvaluationStack.Pop(), method.Parameters[i]));
-            object returnValue = method.Handler.Invoke(this, parameters.ToArray());
-            if (method.Handler.ReturnType != typeof(void))
-                context.EvaluationStack.Push(engine.Convert(returnValue));
-        }
-
-        public static bool IsNative(UInt160 hash)
-        {
-            return contractsHashDictionary.ContainsKey(hash);
-        }
-
-        internal virtual void Initialize(ApplicationEngine engine)
-        {
-        }
-
-        internal virtual void OnPersist(ApplicationEngine engine)
-        {
-        }
-
-        internal virtual void PostPersist(ApplicationEngine engine)
-        {
-        }
-
-        public ApplicationEngine TestCall(string operation, params object[] args)
-        {
-            using (ScriptBuilder sb = new ScriptBuilder())
+            try
             {
-                sb.EmitDynamicCall(Hash, operation, args);
-                return ApplicationEngine.Run(sb.ToArray());
+                if (version != 0)
+                    throw new InvalidOperationException($"The native contract of version {version} is not active.");
+                ExecutionContext context = engine.CurrentContext;
+                ContractMethodMetadata method = methods[context.InstructionPointer];
+                ExecutionContextState state = context.GetState<ExecutionContextState>();
+                if (!state.CallFlags.HasFlag(method.RequiredCallFlags))
+                    throw new InvalidOperationException($"Cannot call this method with the flag {state.CallFlags}.");
+                engine.AddGas(method.CpuFee * Policy.GetExecFeeFactor(engine.Snapshot) + method.StorageFee * Policy.GetStoragePrice(engine.Snapshot));
+                List<object> parameters = new();
+                if (method.NeedApplicationEngine) parameters.Add(engine);
+                if (method.NeedSnapshot) parameters.Add(engine.Snapshot);
+                for (int i = 0; i < method.Parameters.Length; i++)
+                    parameters.Add(engine.Convert(context.EvaluationStack.Pop(), method.Parameters[i]));
+                object returnValue = method.Handler.Invoke(this, parameters.ToArray());
+                if (returnValue is ContractTask task)
+                {
+                    await task;
+                    returnValue = task.GetResult();
+                }
+                if (method.Handler.ReturnType != typeof(void) && method.Handler.ReturnType != typeof(ContractTask))
+                {
+                    context.EvaluationStack.Push(engine.Convert(returnValue));
+                }
+            }
+            catch (Exception ex)
+            {
+                engine.Throw(ex);
             }
         }
 
-        private static ContractParameterType ToParameterType(Type type)
+        /// <summary>
+        /// Determine whether the specified contract is a native contract.
+        /// </summary>
+        /// <param name="hash">The hash of the contract.</param>
+        /// <returns><see langword="true"/> if the contract is native; otherwise, <see langword="false"/>.</returns>
+        public static bool IsNative(UInt160 hash)
         {
-            if (type == typeof(void)) return ContractParameterType.Void;
-            if (type == typeof(bool)) return ContractParameterType.Boolean;
-            if (type == typeof(sbyte)) return ContractParameterType.Integer;
-            if (type == typeof(byte)) return ContractParameterType.Integer;
-            if (type == typeof(short)) return ContractParameterType.Integer;
-            if (type == typeof(ushort)) return ContractParameterType.Integer;
-            if (type == typeof(int)) return ContractParameterType.Integer;
-            if (type == typeof(uint)) return ContractParameterType.Integer;
-            if (type == typeof(long)) return ContractParameterType.Integer;
-            if (type == typeof(ulong)) return ContractParameterType.Integer;
-            if (type == typeof(BigInteger)) return ContractParameterType.Integer;
-            if (type == typeof(byte[])) return ContractParameterType.ByteArray;
-            if (type == typeof(string)) return ContractParameterType.String;
-            if (type == typeof(UInt160)) return ContractParameterType.Hash160;
-            if (type == typeof(UInt256)) return ContractParameterType.Hash256;
-            if (type == typeof(VM.Types.Boolean)) return ContractParameterType.Boolean;
-            if (type == typeof(Integer)) return ContractParameterType.Integer;
-            if (type == typeof(ByteString)) return ContractParameterType.ByteArray;
-            if (type == typeof(VM.Types.Buffer)) return ContractParameterType.ByteArray;
-            if (type == typeof(Array)) return ContractParameterType.Array;
-            if (type == typeof(Struct)) return ContractParameterType.Array;
-            if (type == typeof(Map)) return ContractParameterType.Map;
-            if (type == typeof(StackItem)) return ContractParameterType.Any;
-            if (typeof(IInteroperable).IsAssignableFrom(type)) return ContractParameterType.Array;
-            if (typeof(ISerializable).IsAssignableFrom(type)) return ContractParameterType.ByteArray;
-            if (type.IsArray) return ContractParameterType.Array;
-            if (type.IsEnum) return ContractParameterType.Integer;
-            return ContractParameterType.Any;
+            return contractsDictionary.ContainsKey(hash);
+        }
+
+        internal virtual ContractTask Initialize(ApplicationEngine engine)
+        {
+            return ContractTask.CompletedTask;
+        }
+
+        internal virtual ContractTask OnPersist(ApplicationEngine engine)
+        {
+            return ContractTask.CompletedTask;
+        }
+
+        internal virtual ContractTask PostPersist(ApplicationEngine engine)
+        {
+            return ContractTask.CompletedTask;
         }
     }
 }

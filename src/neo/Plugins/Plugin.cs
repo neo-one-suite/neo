@@ -2,34 +2,59 @@ using Microsoft.Extensions.Configuration;
 using Neo.SmartContract;
 using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
 using static System.IO.Path;
 
 namespace Neo.Plugins
 {
+    /// <summary>
+    /// Represents the base class of all plugins. Any plugin should inherit this class. The plugins are automatically loaded when the process starts.
+    /// </summary>
     public abstract class Plugin : IDisposable
     {
-        public static readonly List<Plugin> Plugins = new List<Plugin>();
-        internal static readonly List<ILogPlugin> Loggers = new List<ILogPlugin>();
-        internal static readonly Dictionary<string, IStorageProvider> Storages = new Dictionary<string, IStorageProvider>();
-        internal static readonly List<IPersistencePlugin> PersistencePlugins = new List<IPersistencePlugin>();
-        internal static readonly List<IP2PPlugin> P2PPlugins = new List<IP2PPlugin>();
-        internal static readonly List<IMemoryPoolTxObserverPlugin> TxObserverPlugins = new List<IMemoryPoolTxObserverPlugin>();
+        /// <summary>
+        /// A list of all loaded plugins.
+        /// </summary>
+        public static readonly List<Plugin> Plugins = new();
 
-        private static ImmutableList<object> services = ImmutableList<object>.Empty;
+        internal static readonly List<ILogPlugin> Loggers = new();
+        internal static readonly Dictionary<string, IStorageProvider> Storages = new();
+        internal static readonly List<IPersistencePlugin> PersistencePlugins = new();
+        internal static readonly List<IP2PPlugin> P2PPlugins = new();
+        internal static readonly List<IMemoryPoolTxObserverPlugin> TxObserverPlugins = new();
+
+        /// <summary>
+        /// The directory containing the plugin dll files. Files can be contained in any subdirectory.
+        /// </summary>
         public static readonly string PluginsDirectory = Combine(GetDirectoryName(Assembly.GetEntryAssembly().Location), "Plugins");
-        private static readonly FileSystemWatcher configWatcher;
-        private static int suspend = 0;
 
+        private static readonly FileSystemWatcher configWatcher;
+
+        /// <summary>
+        /// Indicates the location of the plugin configuration file.
+        /// </summary>
         public virtual string ConfigFile => Combine(PluginsDirectory, GetType().Assembly.GetName().Name, "config.json");
+
+        /// <summary>
+        /// Indicates the name of the plugin.
+        /// </summary>
         public virtual string Name => GetType().Name;
+
+        /// <summary>
+        /// Indicates the description of the plugin.
+        /// </summary>
         public virtual string Description => "";
+
+        /// <summary>
+        /// Indicates the location of the plugin dll file.
+        /// </summary>
         public virtual string Path => Combine(PluginsDirectory, GetType().Assembly.ManifestModule.ScopeName);
-        protected static NeoSystem System { get; private set; }
+
+        /// <summary>
+        /// Indicates the version of the plugin.
+        /// </summary>
         public virtual Version Version => GetType().Assembly.GetName().Version;
 
         static Plugin()
@@ -48,6 +73,9 @@ namespace Neo.Plugins
             }
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="Plugin"/> class.
+        /// </summary>
         protected Plugin()
         {
             Plugins.Add(this);
@@ -62,21 +90,9 @@ namespace Neo.Plugins
             Configure();
         }
 
-        public static void AddService(object service)
-        {
-            ImmutableInterlocked.Update(ref services, p => p.Add(service));
-        }
-
-        private static bool CheckRequiredServices(Type type)
-        {
-            RequiredServicesAttribute attribute = type.GetCustomAttribute<RequiredServicesAttribute>();
-            if (attribute is null) return true;
-            foreach (Type rt in attribute.RequiredServices)
-                if (services.All(p => !rt.IsAssignableFrom(p.GetType())))
-                    return false;
-            return true;
-        }
-
+        /// <summary>
+        /// Called when the plugin is loaded and need to load the configure file, or the configuration file has been modified and needs to be reconfigured.
+        /// </summary>
         protected virtual void Configure()
         {
         }
@@ -109,7 +125,7 @@ namespace Neo.Plugins
             if (args.Name.Contains(".resources"))
                 return null;
 
-            AssemblyName an = new AssemblyName(args.Name);
+            AssemblyName an = new(args.Name);
 
             Assembly assembly = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.FullName == args.Name);
             if (assembly is null)
@@ -138,14 +154,13 @@ namespace Neo.Plugins
         {
         }
 
+        /// <summary>
+        /// Loads the configuration file from the path of <see cref="ConfigFile"/>.
+        /// </summary>
+        /// <returns>The content of the configuration file read.</returns>
         protected IConfigurationSection GetConfiguration()
         {
             return new ConfigurationBuilder().AddJsonFile(ConfigFile, optional: true).Build().GetSection("PluginConfiguration");
-        }
-
-        protected static T GetService<T>()
-        {
-            return services.OfType<T>().FirstOrDefault();
         }
 
         private static void LoadPlugin(Assembly assembly)
@@ -154,7 +169,6 @@ namespace Neo.Plugins
             {
                 if (!type.IsSubclassOf(typeof(Plugin))) continue;
                 if (type.IsAbstract) continue;
-                if (!CheckRequiredServices(type)) continue;
 
                 ConstructorInfo constructor = type.GetConstructor(Type.EmptyTypes);
                 try
@@ -168,11 +182,10 @@ namespace Neo.Plugins
             }
         }
 
-        internal static void LoadPlugins(NeoSystem system)
+        internal static void LoadPlugins()
         {
-            System = system;
             if (!Directory.Exists(PluginsDirectory)) return;
-            List<Assembly> assemblies = new List<Assembly>();
+            List<Assembly> assemblies = new();
             foreach (string filename in Directory.EnumerateFiles(PluginsDirectory, "*.dll", SearchOption.TopDirectoryOnly))
             {
                 try
@@ -187,40 +200,46 @@ namespace Neo.Plugins
             }
         }
 
+        /// <summary>
+        /// Write a log for the plugin.
+        /// </summary>
+        /// <param name="message">The message of the log.</param>
+        /// <param name="level">The level of the log.</param>
         protected void Log(object message, LogLevel level = LogLevel.Info)
         {
             Utility.Log($"{nameof(Plugin)}:{Name}", level, message);
         }
 
+        /// <summary>
+        /// Called when a message to the plugins is received. The messnage is sent by calling <see cref="SendMessage"/>.
+        /// </summary>
+        /// <param name="message">The received message.</param>
+        /// <returns><see langword="true"/> if the <paramref name="message"/> has been handled; otherwise, <see langword="false"/>.</returns>
+        /// <remarks>If a message has been handled by a plugin, the other plugins won't receive it anymore.</remarks>
         protected virtual bool OnMessage(object message)
         {
             return false;
         }
 
-        internal protected virtual void OnPluginsLoaded()
+        /// <summary>
+        /// Called when a <see cref="NeoSystem"/> is loaded.
+        /// </summary>
+        /// <param name="system">The loaded <see cref="NeoSystem"/>.</param>
+        internal protected virtual void OnSystemLoaded(NeoSystem system)
         {
         }
 
-        protected static bool ResumeNodeStartup()
-        {
-            if (Interlocked.Decrement(ref suspend) != 0)
-                return false;
-            System.ResumeNodeStartup();
-            return true;
-        }
-
+        /// <summary>
+        /// Sends a message to all plugins. It can be handled by <see cref="OnMessage"/>.
+        /// </summary>
+        /// <param name="message">The message to send.</param>
+        /// <returns><see langword="true"/> if the <paramref name="message"/> is handled by a plugin; otherwise, <see langword="false"/>.</returns>
         public static bool SendMessage(object message)
         {
             foreach (Plugin plugin in Plugins)
                 if (plugin.OnMessage(message))
                     return true;
             return false;
-        }
-
-        protected static void SuspendNodeStartup()
-        {
-            Interlocked.Increment(ref suspend);
-            System.SuspendNodeStartup();
         }
     }
 }

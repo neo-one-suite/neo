@@ -1,10 +1,7 @@
 using Akka.Actor;
 using Akka.Configuration;
 using Akka.IO;
-using Neo.Cryptography.ECC;
-using Neo.IO;
 using Neo.IO.Actors;
-using Neo.IO.Caching;
 using Neo.Network.P2P;
 using Neo.Network.P2P.Payloads;
 using Neo.Persistence;
@@ -13,145 +10,139 @@ using Neo.SmartContract;
 using Neo.SmartContract.Native;
 using Neo.VM;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
-using System.Threading;
 
 namespace Neo.Ledger
 {
+    /// <summary>
+    /// Actor used to verify and relay <see cref="IInventory"/>.
+    /// </summary>
     public sealed partial class Blockchain : UntypedActor
     {
+        /// <summary>
+        /// Sent by the <see cref="Blockchain"/> when a smart contract is executed.
+        /// </summary>
         public partial class ApplicationExecuted { }
-        public class PersistCompleted { public Block Block; }
-        public class Import { public IEnumerable<Block> Blocks; public bool Verify = true; }
-        public class ImportCompleted { }
-        public class FillMemoryPool { public IEnumerable<Transaction> Transactions; }
-        public class FillCompleted { }
-        internal class PreverifyCompleted { public Transaction Transaction; public VerifyResult Result; }
-        public class RelayResult { public IInventory Inventory; public VerifyResult Result; }
-        private class UnverifiedBlocksList { public LinkedList<Block> Blocks = new LinkedList<Block>(); public HashSet<IActorRef> Nodes = new HashSet<IActorRef>(); }
 
-        public static readonly uint MillisecondsPerBlock = ProtocolSettings.Default.MillisecondsPerBlock;
-        public static readonly TimeSpan TimePerBlock = TimeSpan.FromMilliseconds(MillisecondsPerBlock);
-        public static readonly ECPoint[] StandbyCommittee = ProtocolSettings.Default.StandbyCommittee.Select(p => ECPoint.DecodePoint(p.HexToBytes(), ECCurve.Secp256r1)).ToArray();
-        public static readonly ECPoint[] StandbyValidators = StandbyCommittee[0..ProtocolSettings.Default.ValidatorsCount];
-
-        public static readonly Block GenesisBlock = new Block
+        /// <summary>
+        /// Sent by the <see cref="Blockchain"/> when a <see cref="Network.P2P.Payloads.Block"/> is persisted.
+        /// </summary>
+        public class PersistCompleted
         {
-            PrevHash = UInt256.Zero,
-            Timestamp = (new DateTime(2016, 7, 15, 15, 8, 21, DateTimeKind.Utc)).ToTimestampMS(),
-            Index = 0,
-            NextConsensus = Contract.GetBFTAddress(StandbyValidators),
-            Witness = new Witness
-            {
-                InvocationScript = Array.Empty<byte>(),
-                VerificationScript = new[] { (byte)OpCode.PUSH1 }
-            },
-            ConsensusData = new ConsensusData
-            {
-                PrimaryIndex = 0,
-                Nonce = 2083236893
-            },
-            Transactions = Array.Empty<Transaction>()
-        };
+            /// <summary>
+            /// The <see cref="Network.P2P.Payloads.Block"/> that is persisted.
+            /// </summary>
+            public Block Block { get; init; }
+        }
+
+        /// <summary>
+        /// Sent to the <see cref="Blockchain"/> when importing blocks.
+        /// </summary>
+        public class Import
+        {
+            /// <summary>
+            /// The blocks to be imported.
+            /// </summary>
+            public IEnumerable<Block> Blocks { get; init; }
+
+            /// <summary>
+            /// Indicates whether the blocks need to be verified when importing.
+            /// </summary>
+            public bool Verify { get; init; } = true;
+        }
+
+        /// <summary>
+        /// Sent by the <see cref="Blockchain"/> when the import is complete.
+        /// </summary>
+        public class ImportCompleted { }
+
+        /// <summary>
+        /// Sent to the <see cref="Blockchain"/> when the consensus is filling the memory pool.
+        /// </summary>
+        public class FillMemoryPool
+        {
+            /// <summary>
+            /// The transactions to be sent.
+            /// </summary>
+            public IEnumerable<Transaction> Transactions { get; init; }
+        }
+
+        /// <summary>
+        /// Sent by the <see cref="Blockchain"/> when the memory pool is filled.
+        /// </summary>
+        public class FillCompleted { }
+
+        /// <summary>
+        /// Sent to the <see cref="Blockchain"/> when inventories need to be re-verified.
+        /// </summary>
+        public class Reverify
+        {
+            /// <summary>
+            /// The inventories to be re-verified.
+            /// </summary>
+            public IReadOnlyList<IInventory> Inventories { get; init; }
+        }
+
+        /// <summary>
+        /// Sent by the <see cref="Blockchain"/> when an <see cref="IInventory"/> is relayed.
+        /// </summary>
+        public class RelayResult
+        {
+            /// <summary>
+            /// The <see cref="IInventory"/> that is relayed.
+            /// </summary>
+            public IInventory Inventory { get; init; }
+            /// <summary>
+            /// The result.
+            /// </summary>
+            public VerifyResult Result { get; init; }
+        }
+
+        internal class Initialize { }
+        private class UnverifiedBlocksList { public LinkedList<Block> Blocks = new(); public HashSet<IActorRef> Nodes = new(); }
 
         private readonly static Script onPersistScript, postPersistScript;
         private const int MaxTxToReverifyPerIdle = 10;
-        private static readonly object lockObj = new object();
         private readonly NeoSystem system;
-        private readonly IActorRef txrouter;
-        private readonly ConcurrentDictionary<UInt256, Block> block_cache = new ConcurrentDictionary<UInt256, Block>();
-        private readonly Dictionary<uint, UnverifiedBlocksList> block_cache_unverified = new Dictionary<uint, UnverifiedBlocksList>();
-        internal readonly RelayCache RelayCache = new RelayCache(100);
+        private readonly Dictionary<UInt256, Block> block_cache = new();
+        private readonly Dictionary<uint, UnverifiedBlocksList> block_cache_unverified = new();
         private ImmutableHashSet<UInt160> extensibleWitnessWhiteList;
-
-        public IStore Store { get; }
-        /// <summary>
-        /// A readonly view of the blockchain store.
-        /// Note: It doesn't need to be disposed because the <see cref="ISnapshot"/> inside it is null.
-        /// </summary>
-        public DataCache View => new SnapshotCache(Store);
-        public MemoryPool MemPool { get; }
-        public HeaderCache HeaderCache { get; } = new HeaderCache();
-
-        private static Blockchain singleton;
-        public static Blockchain Singleton
-        {
-            get
-            {
-                while (singleton == null) Thread.Sleep(10);
-                return singleton;
-            }
-        }
 
         static Blockchain()
         {
-            GenesisBlock.RebuildMerkleRoot();
-
-            using (ScriptBuilder sb = new ScriptBuilder())
+            using (ScriptBuilder sb = new())
             {
                 sb.EmitSysCall(ApplicationEngine.System_Contract_NativeOnPersist);
                 onPersistScript = sb.ToArray();
             }
-            using (ScriptBuilder sb = new ScriptBuilder())
+            using (ScriptBuilder sb = new())
             {
                 sb.EmitSysCall(ApplicationEngine.System_Contract_NativePostPersist);
                 postPersistScript = sb.ToArray();
             }
         }
 
-        public Blockchain(NeoSystem system, IStore store)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="Blockchain"/> class.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="Blockchain"/>.</param>
+        public Blockchain(NeoSystem system)
         {
             this.system = system;
-            this.txrouter = Context.ActorOf(TransactionRouter.Props(system));
-            this.MemPool = new MemoryPool(system, ProtocolSettings.Default.MemoryPoolMaxTransactions);
-            this.Store = store;
-            lock (lockObj)
-            {
-                if (singleton != null)
-                    throw new InvalidOperationException();
-                DataCache snapshot = View;
-                if (!NativeContract.Ledger.Initialized(snapshot))
-                {
-                    Persist(GenesisBlock);
-                }
-                else
-                {
-                    UpdateExtensibleWitnessWhiteList(snapshot);
-                }
-                singleton = this;
-            }
-        }
-
-        protected override void PostStop()
-        {
-            base.PostStop();
-            HeaderCache.Dispose();
-        }
-
-        private bool ContainsTransaction(UInt256 hash)
-        {
-            if (MemPool.ContainsKey(hash)) return true;
-            return NativeContract.Ledger.ContainsTransaction(View, hash);
-        }
-
-        public SnapshotCache GetSnapshot()
-        {
-            return new SnapshotCache(Store.GetSnapshot());
         }
 
         private void OnImport(IEnumerable<Block> blocks, bool verify)
         {
-            uint currentHeight = NativeContract.Ledger.CurrentIndex(View);
+            uint currentHeight = NativeContract.Ledger.CurrentIndex(system.StoreView);
             foreach (Block block in blocks)
             {
                 if (block.Index <= currentHeight) continue;
                 if (block.Index != currentHeight + 1)
                     throw new InvalidOperationException();
-                if (verify && !block.Verify(View))
+                if (verify && !block.Verify(system.Settings, system.StoreView))
                     throw new InvalidOperationException();
                 Persist(block);
                 ++currentHeight;
@@ -191,9 +182,9 @@ namespace Neo.Ledger
         private void OnFillMemoryPool(IEnumerable<Transaction> transactions)
         {
             // Invalidate all the transactions in the memory pool, to avoid any failures when adding new transactions.
-            MemPool.InvalidateAllTransactions();
+            system.MemPool.InvalidateAllTransactions();
 
-            DataCache snapshot = View;
+            DataCache snapshot = system.StoreView;
 
             // Add the transactions to the memory pool
             foreach (var tx in transactions)
@@ -201,13 +192,20 @@ namespace Neo.Ledger
                 if (NativeContract.Ledger.ContainsTransaction(snapshot, tx.Hash))
                     continue;
                 // First remove the tx if it is unverified in the pool.
-                MemPool.TryRemoveUnVerified(tx.Hash, out _);
+                system.MemPool.TryRemoveUnVerified(tx.Hash, out _);
                 // Add to the memory pool
-                MemPool.TryAdd(tx, snapshot);
+                system.MemPool.TryAdd(tx, snapshot);
             }
             // Transactions originally in the pool will automatically be reverified based on their priority.
 
             Sender.Tell(new FillCompleted());
+        }
+
+        private void OnInitialize()
+        {
+            if (!NativeContract.Ledger.Initialized(system.StoreView))
+                Persist(system.GenesisBlock);
+            Sender.Tell(new object());
         }
 
         private void OnInventory(IInventory inventory, bool relay = true)
@@ -216,7 +214,8 @@ namespace Neo.Ledger
             {
                 Block block => OnNewBlock(block),
                 Transaction transaction => OnNewTransaction(transaction),
-                _ => OnNewInventory(inventory)
+                ExtensiblePayload payload => OnNewExtensiblePayload(payload),
+                _ => throw new NotSupportedException()
             };
             if (result == VerifyResult.Succeed && relay)
             {
@@ -227,9 +226,9 @@ namespace Neo.Ledger
 
         private VerifyResult OnNewBlock(Block block)
         {
-            DataCache snapshot = View;
+            DataCache snapshot = system.StoreView;
             uint currentHeight = NativeContract.Ledger.CurrentIndex(snapshot);
-            uint headerHeight = HeaderCache.Last?.Index ?? NativeContract.Ledger.CurrentIndex(snapshot);
+            uint headerHeight = system.HeaderCache.Last?.Index ?? currentHeight;
             if (block.Index <= currentHeight)
                 return VerifyResult.AlreadyExists;
             if (block.Index - 1 > headerHeight)
@@ -239,30 +238,30 @@ namespace Neo.Ledger
             }
             if (block.Index == headerHeight + 1)
             {
-                if (!block.Verify(snapshot))
+                if (!block.Verify(system.Settings, snapshot, system.HeaderCache))
                     return VerifyResult.Invalid;
             }
             else
             {
-                if (!block.Hash.Equals(HeaderCache[block.Index].Hash))
+                if (!block.Hash.Equals(system.HeaderCache[block.Index].Hash))
                     return VerifyResult.Invalid;
             }
             block_cache.TryAdd(block.Hash, block);
             if (block.Index == currentHeight + 1)
             {
                 Block block_persist = block;
-                List<Block> blocksToPersistList = new List<Block>();
+                List<Block> blocksToPersistList = new();
                 while (true)
                 {
                     blocksToPersistList.Add(block_persist);
                     if (block_persist.Index + 1 > headerHeight) break;
-                    UInt256 hash = HeaderCache[block_persist.Index + 1].Hash;
+                    UInt256 hash = system.HeaderCache[block_persist.Index + 1].Hash;
                     if (!block_cache.TryGetValue(hash, out block_persist)) break;
                 }
 
                 int blocksPersisted = 0;
                 // 15000 is the default among of seconds per block, while MilliSecondsPerBlock is the current
-                uint extraBlocks = (15000 - MillisecondsPerBlock) / 1000;
+                uint extraBlocks = (15000 - system.Settings.MillisecondsPerBlock) / 1000;
                 foreach (Block blockToPersist in blocksToPersistList)
                 {
                     block_cache_unverified.Remove(blockToPersist.Index);
@@ -287,43 +286,45 @@ namespace Neo.Ledger
                 if (block.Index + 99 >= headerHeight)
                     system.LocalNode.Tell(new LocalNode.RelayDirectly { Inventory = block });
                 if (block.Index == headerHeight + 1)
-                    HeaderCache.Add(block.Header);
+                    system.HeaderCache.Add(block.Header);
             }
             return VerifyResult.Succeed;
         }
 
         private void OnNewHeaders(Header[] headers)
         {
-            if (HeaderCache.Full) return;
-            DataCache snapshot = View;
-            uint headerHeight = HeaderCache.Last?.Index ?? NativeContract.Ledger.CurrentIndex(snapshot);
+            if (system.HeaderCache.Full) return;
+            DataCache snapshot = system.StoreView;
+            uint headerHeight = system.HeaderCache.Last?.Index ?? NativeContract.Ledger.CurrentIndex(snapshot);
             foreach (Header header in headers)
             {
                 if (header.Index > headerHeight + 1) break;
                 if (header.Index < headerHeight + 1) continue;
-                if (!header.Verify(snapshot)) break;
-                HeaderCache.Add(header);
+                if (!header.Verify(system.Settings, snapshot, system.HeaderCache)) break;
+                system.HeaderCache.Add(header);
                 ++headerHeight;
             }
         }
 
-        private VerifyResult OnNewInventory(IInventory inventory)
+        private VerifyResult OnNewExtensiblePayload(ExtensiblePayload payload)
         {
-            if (!inventory.Verify(View)) return VerifyResult.Invalid;
-            RelayCache.Add(inventory);
+            DataCache snapshot = system.StoreView;
+            extensibleWitnessWhiteList ??= UpdateExtensibleWitnessWhiteList(system.Settings, snapshot);
+            if (!payload.Verify(system.Settings, snapshot, extensibleWitnessWhiteList)) return VerifyResult.Invalid;
+            system.RelayCache.Add(payload);
             return VerifyResult.Succeed;
         }
 
         private VerifyResult OnNewTransaction(Transaction transaction)
         {
-            if (ContainsTransaction(transaction.Hash)) return VerifyResult.AlreadyExists;
-            return MemPool.TryAdd(transaction, View);
+            if (system.ContainsTransaction(transaction.Hash)) return VerifyResult.AlreadyExists;
+            return system.MemPool.TryAdd(transaction, system.StoreView);
         }
 
-        private void OnPreverifyCompleted(PreverifyCompleted task)
+        private void OnPreverifyCompleted(TransactionRouter.PreverifyCompleted task)
         {
             if (task.Result == VerifyResult.Succeed)
-                OnInventory(task.Transaction, true);
+                OnInventory(task.Transaction, task.Relay);
             else
                 SendRelayResult(task.Transaction, task.Result);
         }
@@ -332,6 +333,9 @@ namespace Neo.Ledger
         {
             switch (message)
             {
+                case Initialize:
+                    OnInitialize();
+                    break;
                 case Import import:
                     OnImport(import.Blocks, import.Verify);
                     break;
@@ -350,11 +354,15 @@ namespace Neo.Ledger
                 case IInventory inventory:
                     OnInventory(inventory);
                     break;
-                case PreverifyCompleted task:
+                case TransactionRouter.PreverifyCompleted task:
                     OnPreverifyCompleted(task);
                     break;
+                case Reverify reverify:
+                    foreach (IInventory inventory in reverify.Inventories)
+                        OnInventory(inventory, false);
+                    break;
                 case Idle _:
-                    if (MemPool.ReVerifyTopUnverifiedTransactionsIfNeeded(MaxTxToReverifyPerIdle, View))
+                    if (system.MemPool.ReVerifyTopUnverifiedTransactionsIfNeeded(MaxTxToReverifyPerIdle, system.StoreView))
                         Self.Tell(Idle.Instance, ActorRefs.NoSender);
                     break;
             }
@@ -362,22 +370,22 @@ namespace Neo.Ledger
 
         private void OnTransaction(Transaction tx)
         {
-            if (ContainsTransaction(tx.Hash))
+            if (system.ContainsTransaction(tx.Hash))
                 SendRelayResult(tx, VerifyResult.AlreadyExists);
             else
-                txrouter.Tell(tx, Sender);
+                system.TxRouter.Forward(new TransactionRouter.Preverify(tx, true));
         }
 
         private void Persist(Block block)
         {
-            using (SnapshotCache snapshot = GetSnapshot())
+            using (SnapshotCache snapshot = system.GetSnapshot())
             {
-                List<ApplicationExecuted> all_application_executed = new List<ApplicationExecuted>();
-                using (ApplicationEngine engine = ApplicationEngine.Create(TriggerType.OnPersist, null, snapshot, block))
+                List<ApplicationExecuted> all_application_executed = new();
+                using (ApplicationEngine engine = ApplicationEngine.Create(TriggerType.OnPersist, null, snapshot, block, system.Settings, 0))
                 {
                     engine.LoadScript(onPersistScript);
                     if (engine.Execute() != VMState.HALT) throw new InvalidOperationException();
-                    ApplicationExecuted application_executed = new ApplicationExecuted(engine);
+                    ApplicationExecuted application_executed = new(engine);
                     Context.System.EventStream.Publish(application_executed);
                     all_application_executed.Add(application_executed);
                 }
@@ -385,39 +393,37 @@ namespace Neo.Ledger
                 // Warning: Do not write into variable snapshot directly. Write into variable clonedSnapshot and commit instead.
                 foreach (Transaction tx in block.Transactions)
                 {
-                    using (ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Application, tx, clonedSnapshot, block, tx.SystemFee))
+                    using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Application, tx, clonedSnapshot, block, system.Settings, tx.SystemFee);
+                    engine.LoadScript(tx.Script);
+                    if (engine.Execute() == VMState.HALT)
                     {
-                        engine.LoadScript(tx.Script);
-                        if (engine.Execute() == VMState.HALT)
-                        {
-                            clonedSnapshot.Commit();
-                        }
-                        else
-                        {
-                            clonedSnapshot = snapshot.CreateSnapshot();
-                        }
-                        ApplicationExecuted application_executed = new ApplicationExecuted(engine);
-                        Context.System.EventStream.Publish(application_executed);
-                        all_application_executed.Add(application_executed);
+                        clonedSnapshot.Commit();
                     }
+                    else
+                    {
+                        clonedSnapshot = snapshot.CreateSnapshot();
+                    }
+                    ApplicationExecuted application_executed = new(engine);
+                    Context.System.EventStream.Publish(application_executed);
+                    all_application_executed.Add(application_executed);
                 }
-                using (ApplicationEngine engine = ApplicationEngine.Create(TriggerType.PostPersist, null, snapshot, block))
+                using (ApplicationEngine engine = ApplicationEngine.Create(TriggerType.PostPersist, null, snapshot, block, system.Settings, 0))
                 {
                     engine.LoadScript(postPersistScript);
                     if (engine.Execute() != VMState.HALT) throw new InvalidOperationException();
-                    ApplicationExecuted application_executed = new ApplicationExecuted(engine);
+                    ApplicationExecuted application_executed = new(engine);
                     Context.System.EventStream.Publish(application_executed);
                     all_application_executed.Add(application_executed);
                 }
                 foreach (IPersistencePlugin plugin in Plugin.PersistencePlugins)
-                    plugin.OnPersist(block, snapshot, all_application_executed);
+                    plugin.OnPersist(system, block, snapshot, all_application_executed);
                 snapshot.Commit();
                 List<Exception> commitExceptions = null;
                 foreach (IPersistencePlugin plugin in Plugin.PersistencePlugins)
                 {
                     try
                     {
-                        plugin.OnCommit(block, snapshot);
+                        plugin.OnCommit(system, block, snapshot);
                     }
                     catch (Exception ex)
                     {
@@ -431,23 +437,28 @@ namespace Neo.Ledger
                     }
                 }
                 if (commitExceptions != null) throw new AggregateException(commitExceptions);
-                UpdateExtensibleWitnessWhiteList(snapshot);
-                MemPool.UpdatePoolForBlockPersisted(block, snapshot);
+                system.MemPool.UpdatePoolForBlockPersisted(block, snapshot);
             }
-            block_cache.TryRemove(block.PrevHash, out _);
+            extensibleWitnessWhiteList = null;
+            block_cache.Remove(block.PrevHash);
             Context.System.EventStream.Publish(new PersistCompleted { Block = block });
-            if (HeaderCache.TryRemoveFirst(out Header header))
+            if (system.HeaderCache.TryRemoveFirst(out Header header))
                 Debug.Assert(header.Index == block.Index);
         }
 
-        public static Props Props(NeoSystem system, IStore store)
+        /// <summary>
+        /// Gets a <see cref="Akka.Actor.Props"/> object used for creating the <see cref="Blockchain"/> actor.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="Blockchain"/>.</param>
+        /// <returns>The <see cref="Akka.Actor.Props"/> object used for creating the <see cref="Blockchain"/> actor.</returns>
+        public static Props Props(NeoSystem system)
         {
-            return Akka.Actor.Props.Create(() => new Blockchain(system, store)).WithMailbox("blockchain-mailbox");
+            return Akka.Actor.Props.Create(() => new Blockchain(system)).WithMailbox("blockchain-mailbox");
         }
 
         private void SendRelayResult(IInventory inventory, VerifyResult result)
         {
-            RelayResult rr = new RelayResult
+            RelayResult rr = new()
             {
                 Inventory = inventory,
                 Result = result
@@ -456,12 +467,12 @@ namespace Neo.Ledger
             Context.System.EventStream.Publish(rr);
         }
 
-        private void UpdateExtensibleWitnessWhiteList(DataCache snapshot)
+        private static ImmutableHashSet<UInt160> UpdateExtensibleWitnessWhiteList(ProtocolSettings settings, DataCache snapshot)
         {
             uint currentHeight = NativeContract.Ledger.CurrentIndex(snapshot);
             var builder = ImmutableHashSet.CreateBuilder<UInt160>();
             builder.Add(NativeContract.NEO.GetCommitteeAddress(snapshot));
-            var validators = NativeContract.NEO.GetNextBlockValidators(snapshot);
+            var validators = NativeContract.NEO.GetNextBlockValidators(snapshot, settings.ValidatorsCount);
             builder.Add(Contract.GetBFTAddress(validators));
             builder.UnionWith(validators.Select(u => Contract.CreateSignatureRedeemScript(u).ToScriptHash()));
             var oracles = NativeContract.RoleManagement.GetDesignatedByRole(snapshot, Role.Oracle, currentHeight);
@@ -476,34 +487,24 @@ namespace Neo.Ledger
                 builder.Add(Contract.GetBFTAddress(stateValidators));
                 builder.UnionWith(stateValidators.Select(u => Contract.CreateSignatureRedeemScript(u).ToScriptHash()));
             }
-            extensibleWitnessWhiteList = builder.ToImmutable();
-        }
-
-        internal bool IsExtensibleWitnessWhiteListed(UInt160 address)
-        {
-            return extensibleWitnessWhiteList.Contains(address);
+            return builder.ToImmutable();
         }
     }
 
     internal class BlockchainMailbox : PriorityMailbox
     {
-        public BlockchainMailbox(Akka.Actor.Settings settings, Config config)
+        public BlockchainMailbox(Settings settings, Config config)
             : base(settings, config)
         {
         }
 
         internal protected override bool IsHighPriority(object message)
         {
-            switch (message)
+            return message switch
             {
-                case Header[] _:
-                case Block _:
-                case ExtensiblePayload _:
-                case Terminated _:
-                    return true;
-                default:
-                    return false;
-            }
+                Header[] or Block or ExtensiblePayload or Terminated => true,
+                _ => false,
+            };
         }
     }
 }

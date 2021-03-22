@@ -5,14 +5,25 @@ using System.Text.Json;
 
 namespace Neo.IO.Json
 {
+    /// <summary>
+    /// Represents a JSON array.
+    /// </summary>
     public class JArray : JObject, IList<JObject>
     {
-        private readonly List<JObject> items = new List<JObject>();
+        private readonly List<JObject> items = new();
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="JArray"/> class.
+        /// </summary>
+        /// <param name="items">The initial items in the array.</param>
         public JArray(params JObject[] items) : this((IEnumerable<JObject>)items)
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="JArray"/> class.
+        /// </summary>
+        /// <param name="items">The initial items in the array.</param>
         public JArray(IEnumerable<JObject> items)
         {
             this.items.AddRange(items);
@@ -70,6 +81,8 @@ namespace Neo.IO.Json
         {
             items.CopyTo(array, arrayIndex);
         }
+
+        public override JArray GetArray() => this;
 
         public IEnumerator<JObject> GetEnumerator()
         {

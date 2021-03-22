@@ -4,7 +4,6 @@ using Neo.IO;
 using Neo.Network.P2P.Payloads;
 using Neo.Persistence;
 using Neo.SmartContract.Manifest;
-using Neo.VM;
 using Neo.VM.Types;
 using System;
 using System.Collections.Generic;
@@ -13,6 +12,9 @@ using System.Numerics;
 
 namespace Neo.SmartContract.Native
 {
+    /// <summary>
+    /// A native contract used to manage all deployed smart contracts.
+    /// </summary>
     public sealed class ContractManagement : NativeContract
     {
         private const byte Prefix_MinimumDeploymentFee = 20;
@@ -64,15 +66,6 @@ namespace Neo.SmartContract.Native
             Manifest.Abi.Events = events.ToArray();
         }
 
-        private static void Check(byte[] script, ContractAbi abi)
-        {
-            Script s = new Script(script, true);
-            foreach (ContractMethodDescriptor method in abi.Methods)
-                s.GetInstruction(method.Offset);
-            abi.GetMethod(string.Empty, 0); // Trigger the construction of ContractAbi.methodDictionary to check the uniqueness of the method names.
-            _ = abi.Events.ToDictionary(p => p.Name); // Check the uniqueness of the event names.
-        }
-
         private int GetNextAvailableId(DataCache snapshot)
         {
             StorageItem item = snapshot.GetAndChange(CreateStorageKey(Prefix_NextAvailableId));
@@ -81,17 +74,27 @@ namespace Neo.SmartContract.Native
             return value;
         }
 
-        internal override void Initialize(ApplicationEngine engine)
+        internal override ContractTask Initialize(ApplicationEngine engine)
         {
             engine.Snapshot.Add(CreateStorageKey(Prefix_MinimumDeploymentFee), new StorageItem(10_00000000));
             engine.Snapshot.Add(CreateStorageKey(Prefix_NextAvailableId), new StorageItem(1));
+            return ContractTask.CompletedTask;
         }
 
-        internal override void OnPersist(ApplicationEngine engine)
+        private async ContractTask OnDeploy(ApplicationEngine engine, ContractState contract, StackItem data, bool update)
+        {
+            ContractMethodDescriptor md = contract.Manifest.Abi.GetMethod("_deploy", 2);
+            if (md is not null)
+                await engine.CallFromNativeContract(Hash, contract.Hash, md.Name, data, update);
+            engine.SendNotification(Hash, update ? "Update" : "Deploy", new VM.Types.Array { contract.Hash.ToArray() });
+        }
+
+        internal override async ContractTask OnPersist(ApplicationEngine engine)
         {
             foreach (NativeContract contract in Contracts)
             {
-                if (contract.ActiveBlockIndex != engine.PersistingBlock.Index)
+                uint[] updates = engine.ProtocolSettings.NativeUpdateHistory[contract.Name];
+                if (updates.Length == 0 || updates[0] != engine.PersistingBlock.Index)
                     continue;
                 engine.Snapshot.Add(CreateStorageKey(Prefix_Contract).Add(contract.Hash), new StorageItem(new ContractState
                 {
@@ -100,17 +103,17 @@ namespace Neo.SmartContract.Native
                     Hash = contract.Hash,
                     Manifest = contract.Manifest
                 }));
-                contract.Initialize(engine);
+                await contract.Initialize(engine);
             }
         }
 
-        [ContractMethod(0_01000000, CallFlags.ReadStates)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.ReadStates)]
         private long GetMinimumDeploymentFee(DataCache snapshot)
         {
             return (long)(BigInteger)snapshot[CreateStorageKey(Prefix_MinimumDeploymentFee)];
         }
 
-        [ContractMethod(0_03000000, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States)]
         private void SetMinimumDeploymentFee(ApplicationEngine engine, BigInteger value)
         {
             if (value < 0) throw new ArgumentOutOfRangeException(nameof(value));
@@ -118,26 +121,37 @@ namespace Neo.SmartContract.Native
             engine.Snapshot.GetAndChange(CreateStorageKey(Prefix_MinimumDeploymentFee)).Set(value);
         }
 
-        [ContractMethod(0_01000000, CallFlags.ReadStates)]
+        /// <summary>
+        /// Gets the deployed contract with the specified hash.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <param name="hash">The hash of the deployed contract.</param>
+        /// <returns>The deployed contract.</returns>
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.ReadStates)]
         public ContractState GetContract(DataCache snapshot, UInt160 hash)
         {
             return snapshot.TryGet(CreateStorageKey(Prefix_Contract).Add(hash))?.GetInteroperable<ContractState>();
         }
 
+        /// <summary>
+        /// Gets all deployed contracts.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <returns>The deployed contracts.</returns>
         public IEnumerable<ContractState> ListContracts(DataCache snapshot)
         {
             byte[] listContractsPrefix = CreateStorageKey(Prefix_Contract).ToArray();
             return snapshot.Find(listContractsPrefix).Select(kvp => kvp.Value.GetInteroperable<ContractState>());
         }
 
-        [ContractMethod(0, CallFlags.WriteStates | CallFlags.AllowNotify)]
-        private ContractState Deploy(ApplicationEngine engine, byte[] nefFile, byte[] manifest)
+        [ContractMethod(RequiredCallFlags = CallFlags.States | CallFlags.AllowNotify)]
+        private ContractTask<ContractState> Deploy(ApplicationEngine engine, byte[] nefFile, byte[] manifest)
         {
             return Deploy(engine, nefFile, manifest, StackItem.Null);
         }
 
-        [ContractMethod(0, CallFlags.WriteStates | CallFlags.AllowNotify)]
-        private ContractState Deploy(ApplicationEngine engine, byte[] nefFile, byte[] manifest, StackItem data)
+        [ContractMethod(RequiredCallFlags = CallFlags.States | CallFlags.AllowNotify)]
+        private async ContractTask<ContractState> Deploy(ApplicationEngine engine, byte[] nefFile, byte[] manifest, StackItem data)
         {
             if (engine.ScriptContainer is not Transaction tx)
                 throw new InvalidOperationException();
@@ -153,12 +167,12 @@ namespace Neo.SmartContract.Native
 
             NefFile nef = nefFile.AsSerializable<NefFile>();
             ContractManifest parsedManifest = ContractManifest.Parse(manifest);
-            Check(nef.Script, parsedManifest.Abi);
+            Helper.Check(nef.Script, parsedManifest.Abi);
             UInt160 hash = Helper.GetContractHash(tx.Sender, nef.CheckSum, parsedManifest.Name);
             StorageKey key = CreateStorageKey(Prefix_Contract).Add(hash);
             if (engine.Snapshot.Contains(key))
                 throw new InvalidOperationException($"Contract Already Exists: {hash}");
-            ContractState contract = new ContractState
+            ContractState contract = new()
             {
                 Id = GetNextAvailableId(engine.Snapshot),
                 UpdateCounter = 0,
@@ -171,25 +185,19 @@ namespace Neo.SmartContract.Native
 
             engine.Snapshot.Add(key, new StorageItem(contract));
 
-            // Execute _deploy
-
-            ContractMethodDescriptor md = contract.Manifest.Abi.GetMethod("_deploy", 2);
-            if (md != null)
-                engine.CallFromNativeContract(Hash, hash, md.Name, data, false);
-
-            engine.SendNotification(Hash, "Deploy", new VM.Types.Array { contract.Hash.ToArray() });
+            await OnDeploy(engine, contract, data, false);
 
             return contract;
         }
 
-        [ContractMethod(0, CallFlags.WriteStates | CallFlags.AllowNotify)]
-        private void Update(ApplicationEngine engine, byte[] nefFile, byte[] manifest)
+        [ContractMethod(RequiredCallFlags = CallFlags.States | CallFlags.AllowNotify)]
+        private ContractTask Update(ApplicationEngine engine, byte[] nefFile, byte[] manifest)
         {
-            Update(engine, nefFile, manifest, StackItem.Null);
+            return Update(engine, nefFile, manifest, StackItem.Null);
         }
 
-        [ContractMethod(0, CallFlags.WriteStates | CallFlags.AllowNotify)]
-        private void Update(ApplicationEngine engine, byte[] nefFile, byte[] manifest, StackItem data)
+        [ContractMethod(RequiredCallFlags = CallFlags.States | CallFlags.AllowNotify)]
+        private ContractTask Update(ApplicationEngine engine, byte[] nefFile, byte[] manifest, StackItem data)
         {
             if (nefFile is null && manifest is null) throw new ArgumentException();
 
@@ -217,18 +225,12 @@ namespace Neo.SmartContract.Native
                     throw new InvalidOperationException($"Invalid Manifest Hash: {contract.Hash}");
                 contract.Manifest = manifest_new;
             }
-            Check(contract.Nef.Script, contract.Manifest.Abi);
+            Helper.Check(contract.Nef.Script, contract.Manifest.Abi);
             contract.UpdateCounter++; // Increase update counter
-            if (nefFile != null)
-            {
-                ContractMethodDescriptor md = contract.Manifest.Abi.GetMethod("_deploy", 2);
-                if (md != null)
-                    engine.CallFromNativeContract(Hash, contract.Hash, md.Name, data, true);
-            }
-            engine.SendNotification(Hash, "Update", new VM.Types.Array { contract.Hash.ToArray() });
+            return OnDeploy(engine, contract, data, true);
         }
 
-        [ContractMethod(0_01000000, CallFlags.WriteStates | CallFlags.AllowNotify)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States | CallFlags.AllowNotify)]
         private void Destroy(ApplicationEngine engine)
         {
             UInt160 hash = engine.CallingScriptHash;
@@ -236,7 +238,7 @@ namespace Neo.SmartContract.Native
             ContractState contract = engine.Snapshot.TryGet(ckey)?.GetInteroperable<ContractState>();
             if (contract is null) return;
             engine.Snapshot.Delete(ckey);
-            foreach (var (key, _) in engine.Snapshot.Find(BitConverter.GetBytes(contract.Id)))
+            foreach (var (key, _) in engine.Snapshot.Find(StorageKey.CreateSearchPrefix(contract.Id, ReadOnlySpan<byte>.Empty)))
                 engine.Snapshot.Delete(key);
             engine.SendNotification(Hash, "Destroy", new VM.Types.Array { hash.ToArray() });
         }

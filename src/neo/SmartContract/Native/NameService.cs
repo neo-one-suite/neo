@@ -15,6 +15,9 @@ using System.Text.RegularExpressions;
 
 namespace Neo.SmartContract.Native
 {
+    /// <summary>
+    /// A native name service for NEO system.
+    /// </summary>
     public sealed class NameService : NonfungibleToken<NameService.NameState>
     {
         public override string Symbol => "NNS";
@@ -25,23 +28,23 @@ namespace Neo.SmartContract.Native
         private const byte Prefix_Record = 12;
 
         private const uint OneYear = 365 * 24 * 3600;
-        private static readonly Regex rootRegex = new Regex("^[a-z][a-z0-9]{0,15}$", RegexOptions.Singleline);
-        private static readonly Regex nameRegex = new Regex("^(?=.{3,255}$)([a-z0-9]{1,62}\\.)+[a-z][a-z0-9]{0,15}$", RegexOptions.Singleline);
-        private static readonly Regex ipv4Regex = new Regex("^(2(5[0-5]|[0-4]\\d))|1?\\d{1,2}(\\.((2(5[0-5]|[0-4]\\d))|1?\\d{1,2})){3}$", RegexOptions.Singleline);
-        private static readonly Regex ipv6Regex = new Regex("^([a-f0-9]{1,4}:){7}[a-f0-9]{1,4}$", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        private static readonly Regex rootRegex = new("^[a-z][a-z0-9]{0,15}$", RegexOptions.Singleline);
+        private static readonly Regex nameRegex = new("^(?=.{3,255}$)([a-z0-9]{1,62}\\.)+[a-z][a-z0-9]{0,15}$", RegexOptions.Singleline);
+        private static readonly Regex ipv4Regex = new("^(?=\\d+\\.\\d+\\.\\d+\\.\\d+$)(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\\.?){4}$", RegexOptions.Singleline);
+        private static readonly Regex ipv6Regex = new("(?:^)(([0-9a-f]{1,4}:){7,7}[0-9a-f]{1,4}|([0-9a-f]{1,4}:){1,7}:|([0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}|([0-9a-f]{1,4}:){1,5}(:[0-9a-f]{1,4}){1,2}|([0-9a-f]{1,4}:){1,4}(:[0-9a-f]{1,4}){1,3}|([0-9a-f]{1,4}:){1,3}(:[0-9a-f]{1,4}){1,4}|([0-9a-f]{1,4}:){1,2}(:[0-9a-f]{1,4}){1,5}|[0-9a-f]{1,4}:((:[0-9a-f]{1,4}){1,6})|:((:[0-9a-f]{1,4}){1,7}|:))(?=$)", RegexOptions.Singleline);
 
         internal NameService()
         {
         }
 
-        internal override void Initialize(ApplicationEngine engine)
+        internal override ContractTask Initialize(ApplicationEngine engine)
         {
-            base.Initialize(engine);
             engine.Snapshot.Add(CreateStorageKey(Prefix_Roots), new StorageItem(new StringList()));
             engine.Snapshot.Add(CreateStorageKey(Prefix_DomainPrice), new StorageItem(10_00000000));
+            return base.Initialize(engine);
         }
 
-        internal override void OnPersist(ApplicationEngine engine)
+        internal override async ContractTask OnPersist(ApplicationEngine engine)
         {
             uint now = (uint)(engine.PersistingBlock.Timestamp / 1000) + 1;
             byte[] start = CreateStorageKey(Prefix_Expiration).AddBigEndian(0).ToArray();
@@ -51,7 +54,7 @@ namespace Neo.SmartContract.Native
                 engine.Snapshot.Delete(key);
                 foreach (var (key2, _) in engine.Snapshot.Find(CreateStorageKey(Prefix_Record).Add(key.Key.AsSpan(5)).ToArray()))
                     engine.Snapshot.Delete(key2);
-                Burn(engine, CreateStorageKey(Prefix_Token).Add(key.Key.AsSpan(5)));
+                await Burn(engine, CreateStorageKey(Prefix_Token).Add(key.Key.AsSpan(5)));
             }
         }
 
@@ -65,7 +68,7 @@ namespace Neo.SmartContract.Native
             return Crypto.Hash160(tokenId);
         }
 
-        [ContractMethod(0_03000000, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States)]
         private void AddRoot(ApplicationEngine engine, string root)
         {
             if (!rootRegex.IsMatch(root)) throw new ArgumentException(null, nameof(root));
@@ -76,12 +79,17 @@ namespace Neo.SmartContract.Native
             roots.Insert(~index, root);
         }
 
+        /// <summary>
+        /// Gets all the root names in the system.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <returns>All the root names in the system.</returns>
         public IEnumerable<string> GetRoots(DataCache snapshot)
         {
             return snapshot[CreateStorageKey(Prefix_Roots)].GetInteroperable<StringList>();
         }
 
-        [ContractMethod(0_03000000, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States)]
         private void SetPrice(ApplicationEngine engine, long price)
         {
             if (price <= 0 || price > 10000_00000000) throw new ArgumentOutOfRangeException(nameof(price));
@@ -89,13 +97,26 @@ namespace Neo.SmartContract.Native
             engine.Snapshot.GetAndChange(CreateStorageKey(Prefix_DomainPrice)).Set(price);
         }
 
-        [ContractMethod(0_01000000, CallFlags.ReadStates)]
+        /// <summary>
+        /// Gets the price for registering a name.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <returns>The price for registering a name.</returns>
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.ReadStates)]
         public long GetPrice(DataCache snapshot)
         {
             return (long)(BigInteger)snapshot[CreateStorageKey(Prefix_DomainPrice)];
         }
 
-        [ContractMethod(0_01000000, CallFlags.ReadStates)]
+        /// <summary>
+        /// Determine whether the specified name is available to be registered.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <param name="name">The name to check.</param>
+        /// <returns><see langword="true"/> if the name is available; otherwise, <see langword="false"/>.</returns>
+        /// <exception cref="ArgumentException">The format of <paramref name="name"/> is incorrect.</exception>
+        /// <exception cref="InvalidOperationException">The root name doesn't exist.</exception>
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.ReadStates)]
         public bool IsAvailable(DataCache snapshot, string name)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -108,8 +129,8 @@ namespace Neo.SmartContract.Native
             return true;
         }
 
-        [ContractMethod(0_01000000, CallFlags.WriteStates)]
-        private bool Register(ApplicationEngine engine, string name, UInt160 owner)
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States)]
+        private async ContractTask<bool> Register(ApplicationEngine engine, string name, UInt160 owner)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
             string[] names = name.Split('.');
@@ -120,19 +141,18 @@ namespace Neo.SmartContract.Native
             StringList roots = engine.Snapshot[CreateStorageKey(Prefix_Roots)].GetInteroperable<StringList>();
             if (roots.BinarySearch(names[1]) < 0) throw new InvalidOperationException();
             engine.AddGas(GetPrice(engine.Snapshot));
-            NameState state = new NameState
+            NameState state = new()
             {
                 Owner = owner,
                 Name = name,
-                Description = "",
                 Expiration = (uint)(engine.PersistingBlock.Timestamp / 1000) + OneYear
             };
-            Mint(engine, state);
+            await Mint(engine, state);
             engine.Snapshot.Add(CreateStorageKey(Prefix_Expiration).AddBigEndian(state.Expiration).Add(hash), new StorageItem(new byte[] { 0 }));
             return true;
         }
 
-        [ContractMethod(0, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States)]
         private uint Renew(ApplicationEngine engine, string name)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -147,7 +167,7 @@ namespace Neo.SmartContract.Native
             return state.Expiration;
         }
 
-        [ContractMethod(0_03000000, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, StorageFee = 20, RequiredCallFlags = CallFlags.States)]
         private void SetAdmin(ApplicationEngine engine, string name, UInt160 admin)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -166,7 +186,7 @@ namespace Neo.SmartContract.Native
             return engine.CheckWitnessInternal(state.Admin);
         }
 
-        [ContractMethod(0_30000000, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, StorageFee = 200, RequiredCallFlags = CallFlags.States)]
         private void SetRecord(ApplicationEngine engine, string name, RecordType type, string data)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -199,7 +219,14 @@ namespace Neo.SmartContract.Native
             item.Value = Utility.StrictUTF8.GetBytes(data);
         }
 
-        [ContractMethod(0_01000000, CallFlags.ReadStates)]
+        /// <summary>
+        /// Gets a record for the specified name.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <param name="name">The name for the record.</param>
+        /// <param name="type">The type of the record.</param>
+        /// <returns>The record without resolved. Or <see langword="null"/> if no record is found.</returns>
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.ReadStates)]
         public string GetRecord(DataCache snapshot, string name, RecordType type)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -210,6 +237,12 @@ namespace Neo.SmartContract.Native
             return Utility.StrictUTF8.GetString(item.Value);
         }
 
+        /// <summary>
+        /// Gets all the records for the specified name.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <param name="name">The name for the record.</param>
+        /// <returns>All the records for the name.</returns>
         public IEnumerable<(RecordType Type, string Data)> GetRecords(DataCache snapshot, string name)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -219,7 +252,7 @@ namespace Neo.SmartContract.Native
                 yield return ((RecordType)key.Key[^1], Utility.StrictUTF8.GetString(value.Value));
         }
 
-        [ContractMethod(0_01000000, CallFlags.WriteStates)]
+        [ContractMethod(CpuFee = 1 << 15, RequiredCallFlags = CallFlags.States)]
         private void DeleteRecord(ApplicationEngine engine, string name, RecordType type)
         {
             if (!nameRegex.IsMatch(name)) throw new ArgumentException(null, nameof(name));
@@ -230,7 +263,14 @@ namespace Neo.SmartContract.Native
             engine.Snapshot.Delete(CreateStorageKey(Prefix_Record).Add(hash_domain).Add(GetKey(Utility.StrictUTF8.GetBytes(name))).Add(type));
         }
 
-        [ContractMethod(0_03000000, CallFlags.ReadStates)]
+        /// <summary>
+        /// Gets and resolves a record for the specified name.
+        /// </summary>
+        /// <param name="snapshot">The snapshot used to read data.</param>
+        /// <param name="name">The name for the record.</param>
+        /// <param name="type">The type of the record.</param>
+        /// <returns>The resolved record.</returns>
+        [ContractMethod(CpuFee = 1 << 17, RequiredCallFlags = CallFlags.ReadStates)]
         public string Resolve(DataCache snapshot, string name, RecordType type)
         {
             return Resolve(snapshot, name, type, 2);
@@ -245,9 +285,19 @@ namespace Neo.SmartContract.Native
             return Resolve(snapshot, data, type, redirect - 1);
         }
 
+        /// <summary>
+        /// The token state of <see cref="NameService"/>.
+        /// </summary>
         public class NameState : NFTState
         {
+            /// <summary>
+            /// Indicates when the name expires.
+            /// </summary>
             public uint Expiration;
+
+            /// <summary>
+            /// The administrator of the name.
+            /// </summary>
             public UInt160 Admin;
 
             public override byte[] Id => Utility.StrictUTF8.GetBytes(Name);
@@ -263,8 +313,8 @@ namespace Neo.SmartContract.Native
             {
                 base.FromStackItem(stackItem);
                 Struct @struct = (Struct)stackItem;
-                Expiration = (uint)@struct[3].GetInteger();
-                Admin = @struct[4].IsNull ? null : new UInt160(@struct[4].GetSpan());
+                Expiration = (uint)@struct[2].GetInteger();
+                Admin = @struct[3].IsNull ? null : new UInt160(@struct[3].GetSpan());
             }
 
             public override StackItem ToStackItem(ReferenceCounter referenceCounter)

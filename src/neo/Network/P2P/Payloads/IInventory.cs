@@ -1,13 +1,13 @@
-using Neo.Persistence;
-
 namespace Neo.Network.P2P.Payloads
 {
+    /// <summary>
+    /// Represents a message that can be relayed on the NEO network.
+    /// </summary>
     public interface IInventory : IVerifiable
     {
-        UInt256 Hash { get; }
-
+        /// <summary>
+        /// The type of the inventory.
+        /// </summary>
         InventoryType InventoryType { get; }
-
-        bool Verify(DataCache snapshot);
     }
 }

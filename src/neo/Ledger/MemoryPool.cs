@@ -3,7 +3,6 @@ using Neo.Network.P2P;
 using Neo.Network.P2P.Payloads;
 using Neo.Persistence;
 using Neo.Plugins;
-using Neo.SmartContract.Native;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -13,16 +12,19 @@ using System.Threading;
 
 namespace Neo.Ledger
 {
+    /// <summary>
+    /// Used to cache verified transactions before being written into the block.
+    /// </summary>
     public class MemoryPool : IReadOnlyCollection<Transaction>
     {
         // Allow a reverified transaction to be rebroadcasted if it has been this many block times since last broadcast.
         private const int BlocksTillRebroadcast = 10;
         private int RebroadcastMultiplierThreshold => Capacity / 10;
 
-        private static readonly double MaxMillisecondsToReverifyTx = (double)Blockchain.MillisecondsPerBlock / 3;
+        private readonly double MaxMillisecondsToReverifyTx;
 
         // These two are not expected to be hit, they are just safegaurds.
-        private static readonly double MaxMillisecondsToReverifyTxPerIdle = (double)Blockchain.MillisecondsPerBlock / 15;
+        private readonly double MaxMillisecondsToReverifyTxPerIdle;
 
         private readonly NeoSystem _system;
 
@@ -34,16 +36,16 @@ namespace Neo.Ledger
         ///       performed by the blockchain actor do not need to acquire the read lock; they only need the write
         ///       lock for write operations.
         /// </summary>
-        private readonly ReaderWriterLockSlim _txRwLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+        private readonly ReaderWriterLockSlim _txRwLock = new(LockRecursionPolicy.SupportsRecursion);
 
         /// <summary>
         /// Store all verified unsorted transactions currently in the pool.
         /// </summary>
-        private readonly Dictionary<UInt256, PoolItem> _unsortedTransactions = new Dictionary<UInt256, PoolItem>();
+        private readonly Dictionary<UInt256, PoolItem> _unsortedTransactions = new();
         /// <summary>
         /// Stores the verified sorted transactins currently in the pool.
         /// </summary>
-        private readonly SortedSet<PoolItem> _sortedTransactions = new SortedSet<PoolItem>();
+        private readonly SortedSet<PoolItem> _sortedTransactions = new();
 
         /// <summary>
         /// Store the unverified transactions currently in the pool.
@@ -52,8 +54,8 @@ namespace Neo.Ledger
         /// The top ones that could make it into the next block get verified and moved into the verified data structures
         /// (_unsortedTransactions, and _sortedTransactions) after each block.
         /// </summary>
-        private readonly Dictionary<UInt256, PoolItem> _unverifiedTransactions = new Dictionary<UInt256, PoolItem>();
-        private readonly SortedSet<PoolItem> _unverifiedSortedTransactions = new SortedSet<PoolItem>();
+        private readonly Dictionary<UInt256, PoolItem> _unverifiedTransactions = new();
+        private readonly SortedSet<PoolItem> _unverifiedSortedTransactions = new();
 
         // Internal methods to aid in unit testing
         internal int SortedTxCount => _sortedTransactions.Count;
@@ -67,7 +69,7 @@ namespace Neo.Ledger
         /// <summary>
         /// Store all verified unsorted transactions' senders' fee currently in the memory pool.
         /// </summary>
-        private TransactionVerificationContext VerificationContext = new TransactionVerificationContext();
+        private TransactionVerificationContext VerificationContext = new();
 
         /// <summary>
         /// Total count of transactions in the pool.
@@ -93,21 +95,32 @@ namespace Neo.Ledger
         /// </summary>
         public int VerifiedCount => _unsortedTransactions.Count; // read of 32 bit type is atomic (no lock)
 
+        /// <summary>
+        /// Total count of unverified transactions in the pool.
+        /// </summary>
         public int UnVerifiedCount => _unverifiedTransactions.Count;
 
-        public MemoryPool(NeoSystem system, int capacity)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="MemoryPool"/> class.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="MemoryPool"/>.</param>
+        public MemoryPool(NeoSystem system)
         {
             _system = system;
-            Capacity = capacity;
+            Capacity = system.Settings.MemoryPoolMaxTransactions;
+            MaxMillisecondsToReverifyTx = (double)system.Settings.MillisecondsPerBlock / 3;
+            MaxMillisecondsToReverifyTxPerIdle = (double)system.Settings.MillisecondsPerBlock / 15;
         }
 
         /// <summary>
         /// Determine whether the pool is holding this transaction and has at some point verified it.
-        /// Note: The pool may not have verified it since the last block was persisted. To get only the
-        ///       transactions that have been verified during this block use GetVerifiedTransactions()
         /// </summary>
-        /// <param name="hash">the transaction hash</param>
-        /// <returns>true if the MemoryPool contain the transaction</returns>
+        /// <param name="hash">The transaction hash.</param>
+        /// <returns><see langword="true"/> if the <see cref="MemoryPool"/> contains the transaction; otherwise, <see langword="false"/>.</returns>
+        /// <remarks>
+        /// Note: The pool may not have verified it since the last block was persisted. To get only the
+        ///       transactions that have been verified during this block use <see cref="GetVerifiedTransactions"/>.
+        /// </remarks>
         public bool ContainsKey(UInt256 hash)
         {
             _txRwLock.EnterReadLock();
@@ -121,6 +134,12 @@ namespace Neo.Ledger
             }
         }
 
+        /// <summary>
+        /// Gets the <see cref="Transaction"/> associated with the specified hash.
+        /// </summary>
+        /// <param name="hash">The hash of the <see cref="Transaction"/> to get.</param>
+        /// <param name="tx">When this method returns, contains the <see cref="Transaction"/> associated with the specified hash, if the hash is found; otherwise, <see langword="null"/>.</param>
+        /// <returns><see langword="true"/> if the <see cref="MemoryPool"/> contains a <see cref="Transaction"/> with the specified hash; otherwise, <see langword="false"/>.</returns>
         public bool TryGetValue(UInt256 hash, out Transaction tx)
         {
             _txRwLock.EnterReadLock();
@@ -156,6 +175,10 @@ namespace Neo.Ledger
 
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
+        /// <summary>
+        /// Gets the verified transactions in the <see cref="MemoryPool"/>.
+        /// </summary>
+        /// <returns>The verified transactions.</returns>
         public IEnumerable<Transaction> GetVerifiedTransactions()
         {
             _txRwLock.EnterReadLock();
@@ -169,6 +192,11 @@ namespace Neo.Ledger
             }
         }
 
+        /// <summary>
+        /// Gets both the verified and the unverified transactions in the <see cref="MemoryPool"/>.
+        /// </summary>
+        /// <param name="verifiedTransactions">The verified transactions.</param>
+        /// <param name="unverifiedTransactions">The unverified transactions.</param>
         public void GetVerifiedAndUnverifiedTransactions(out IEnumerable<Transaction> verifiedTransactions,
             out IEnumerable<Transaction> unverifiedTransactions)
         {
@@ -184,6 +212,10 @@ namespace Neo.Ledger
             }
         }
 
+        /// <summary>
+        /// Gets the sorted verified transactions in the <see cref="MemoryPool"/>.
+        /// </summary>
+        /// <returns>The sorted verified transactions.</returns>
         public IEnumerable<Transaction> GetSortedVerifiedTransactions()
         {
             _txRwLock.EnterReadLock();
@@ -239,15 +271,6 @@ namespace Neo.Ledger
             return GetLowestFeeTransaction(out _, out _).CompareTo(tx) <= 0;
         }
 
-        /// <summary>
-        /// Adds an already verified transaction to the memory pool.
-        ///
-        /// Note: This must only be called from a single thread (the Blockchain actor). To add a transaction to the pool
-        ///       tell the Blockchain actor about the transaction.
-        /// </summary>
-        /// <param name="hash"></param>
-        /// <param name="tx"></param>
-        /// <returns></returns>
         internal VerifyResult TryAdd(Transaction tx, DataCache snapshot)
         {
             var poolItem = new PoolItem(tx);
@@ -258,7 +281,7 @@ namespace Neo.Ledger
             _txRwLock.EnterWriteLock();
             try
             {
-                VerifyResult result = tx.VerifyStateDependent(snapshot, VerificationContext);
+                VerifyResult result = tx.VerifyStateDependent(_system.Settings, snapshot, VerificationContext);
                 if (result != VerifyResult.Succeed) return result;
 
                 _unsortedTransactions.Add(tx.Hash, poolItem);
@@ -275,9 +298,9 @@ namespace Neo.Ledger
 
             foreach (IMemoryPoolTxObserverPlugin plugin in Plugin.TxObserverPlugins)
             {
-                plugin.TransactionAdded(poolItem.Tx);
+                plugin.TransactionAdded(_system, poolItem.Tx);
                 if (removedTransactions != null)
-                    plugin.TransactionsRemoved(MemoryPoolTxRemovalReason.CapacityExceeded, removedTransactions);
+                    plugin.TransactionsRemoved(_system, MemoryPoolTxRemovalReason.CapacityExceeded, removedTransactions);
             }
 
             if (!_unsortedTransactions.ContainsKey(tx.Hash)) return VerifyResult.OutOfMemory;
@@ -286,7 +309,7 @@ namespace Neo.Ledger
 
         private List<Transaction> RemoveOverCapacity()
         {
-            List<Transaction> removedTransactions = new List<Transaction>();
+            List<Transaction> removedTransactions = new();
             do
             {
                 PoolItem minItem = GetLowestFeeTransaction(out var unsortedPool, out var sortedPool);
@@ -361,8 +384,12 @@ namespace Neo.Ledger
                 _txRwLock.ExitWriteLock();
             }
 
-            uint _maxTxPerBlock = NativeContract.Policy.GetMaxTransactionsPerBlock(snapshot);
-            ReverifyTransactions(_sortedTransactions, _unverifiedSortedTransactions, (int)_maxTxPerBlock, MaxMillisecondsToReverifyTx, snapshot);
+            // If we know about headers of future blocks, no point in verifying transactions from the unverified tx pool
+            // until we get caught up.
+            if (block.Index > 0 && _system.HeaderCache.Count > 0)
+                return;
+
+            ReverifyTransactions(_sortedTransactions, _unverifiedSortedTransactions, (int)_system.Settings.MaxTransactionsPerBlock, MaxMillisecondsToReverifyTx, snapshot);
         }
 
         internal void InvalidateAllTransactions()
@@ -382,8 +409,8 @@ namespace Neo.Ledger
             SortedSet<PoolItem> unverifiedSortedTxPool, int count, double millisecondsTimeout, DataCache snapshot)
         {
             DateTime reverifyCutOffTimeStamp = TimeProvider.Current.UtcNow.AddMilliseconds(millisecondsTimeout);
-            List<PoolItem> reverifiedItems = new List<PoolItem>(count);
-            List<PoolItem> invalidItems = new List<PoolItem>();
+            List<PoolItem> reverifiedItems = new(count);
+            List<PoolItem> invalidItems = new();
 
             _txRwLock.EnterWriteLock();
             try
@@ -391,7 +418,7 @@ namespace Neo.Ledger
                 // Since unverifiedSortedTxPool is ordered in an ascending manner, we take from the end.
                 foreach (PoolItem item in unverifiedSortedTxPool.Reverse().Take(count))
                 {
-                    if (item.Tx.VerifyStateDependent(snapshot, VerificationContext) == VerifyResult.Succeed)
+                    if (item.Tx.VerifyStateDependent(_system.Settings, snapshot, VerificationContext) == VerifyResult.Succeed)
                     {
                         reverifiedItems.Add(item);
                         VerificationContext.AddTransaction(item.Tx);
@@ -407,8 +434,7 @@ namespace Neo.Ledger
                 if (Count > RebroadcastMultiplierThreshold)
                     blocksTillRebroadcast = blocksTillRebroadcast * Count / RebroadcastMultiplierThreshold;
 
-                var rebroadcastCutOffTime = TimeProvider.Current.UtcNow.AddMilliseconds(
-                    -Blockchain.MillisecondsPerBlock * blocksTillRebroadcast);
+                var rebroadcastCutOffTime = TimeProvider.Current.UtcNow.AddMilliseconds(-_system.Settings.MillisecondsPerBlock * blocksTillRebroadcast);
                 foreach (PoolItem item in reverifiedItems)
                 {
                     if (_unsortedTransactions.TryAdd(item.Tx.Hash, item))
@@ -441,7 +467,7 @@ namespace Neo.Ledger
 
             var invalidTransactions = invalidItems.Select(p => p.Tx).ToArray();
             foreach (IMemoryPoolTxObserverPlugin plugin in Plugin.TxObserverPlugins)
-                plugin.TransactionsRemoved(MemoryPoolTxRemovalReason.NoLongerValid, invalidTransactions);
+                plugin.TransactionsRemoved(_system, MemoryPoolTxRemovalReason.NoLongerValid, invalidTransactions);
 
             return reverifiedItems.Count;
         }
@@ -457,10 +483,12 @@ namespace Neo.Ledger
         /// <returns>true if more unsorted messages exist, otherwise false</returns>
         internal bool ReVerifyTopUnverifiedTransactionsIfNeeded(int maxToVerify, DataCache snapshot)
         {
+            if (_system.HeaderCache.Count > 0)
+                return false;
+
             if (_unverifiedSortedTransactions.Count > 0)
             {
-                uint _maxTxPerBlock = NativeContract.Policy.GetMaxTransactionsPerBlock(snapshot);
-                int verifyCount = _sortedTransactions.Count > _maxTxPerBlock ? 1 : maxToVerify;
+                int verifyCount = _sortedTransactions.Count > _system.Settings.MaxTransactionsPerBlock ? 1 : maxToVerify;
                 ReverifyTransactions(_sortedTransactions, _unverifiedSortedTransactions,
                     verifyCount, MaxMillisecondsToReverifyTxPerIdle, snapshot);
             }

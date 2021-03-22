@@ -8,68 +8,89 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace Neo.Network.P2P
 {
+    /// <summary>
+    /// Actor used to manage the connections of the local node.
+    /// </summary>
     public class LocalNode : Peer
     {
+        /// <summary>
+        /// Sent to <see cref="LocalNode"/> to relay an <see cref="IInventory"/>.
+        /// </summary>
         public class RelayDirectly { public IInventory Inventory; }
+
+        /// <summary>
+        /// Sent to <see cref="LocalNode"/> to send an <see cref="IInventory"/>.
+        /// </summary>
         public class SendDirectly { public IInventory Inventory; }
 
+        /// <summary>
+        /// Sent to <see cref="LocalNode"/> to request for an instance of <see cref="LocalNode"/>.
+        /// </summary>
+        public class GetInstance { }
+
+        /// <summary>
+        /// Indicates the protocol version of the local node.
+        /// </summary>
         public const uint ProtocolVersion = 0;
+
         private const int MaxCountFromSeedList = 5;
-        private readonly IPEndPoint[] SeedList = new IPEndPoint[ProtocolSettings.Default.SeedList.Length];
+        private readonly IPEndPoint[] SeedList;
 
-        private static readonly object lockObj = new object();
         private readonly NeoSystem system;
-        internal readonly ConcurrentDictionary<IActorRef, RemoteNode> RemoteNodes = new ConcurrentDictionary<IActorRef, RemoteNode>();
+        internal readonly ConcurrentDictionary<IActorRef, RemoteNode> RemoteNodes = new();
 
+        /// <summary>
+        /// Indicates the number of connected nodes.
+        /// </summary>
         public int ConnectedCount => RemoteNodes.Count;
-        public int UnconnectedCount => UnconnectedPeers.Count;
-        public static readonly uint Nonce;
-        public static string UserAgent { get; set; }
 
-        private static LocalNode singleton;
-        public static LocalNode Singleton
-        {
-            get
-            {
-                while (singleton == null) Thread.Sleep(10);
-                return singleton;
-            }
-        }
+        /// <summary>
+        /// Indicates the number of unconnected nodes. When the number of connections is not enough, it will automatically connect to these nodes.
+        /// </summary>
+        public int UnconnectedCount => UnconnectedPeers.Count;
+
+        /// <summary>
+        /// The random number used to identify the local node.
+        /// </summary>
+        public static readonly uint Nonce;
+
+        /// <summary>
+        /// The identifier of the client software of the local node.
+        /// </summary>
+        public static string UserAgent { get; set; }
 
         static LocalNode()
         {
-            Random rand = new Random();
+            Random rand = new();
             Nonce = (uint)rand.Next();
             UserAgent = $"/{Assembly.GetExecutingAssembly().GetName().Name}:{Assembly.GetExecutingAssembly().GetVersion()}/";
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="LocalNode"/> class.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="LocalNode"/>.</param>
         public LocalNode(NeoSystem system)
         {
-            lock (lockObj)
-            {
-                if (singleton != null)
-                    throw new InvalidOperationException();
-                this.system = system;
-                singleton = this;
+            this.system = system;
+            this.SeedList = new IPEndPoint[system.Settings.SeedList.Length];
 
-                // Start dns resolution in parallel
-                string[] seedList = ProtocolSettings.Default.SeedList;
-                for (int i = 0; i < seedList.Length; i++)
-                {
-                    int index = i;
-                    Task.Run(() => SeedList[index] = GetIpEndPoint(seedList[index]));
-                }
+            // Start dns resolution in parallel
+            string[] seedList = system.Settings.SeedList;
+            for (int i = 0; i < seedList.Length; i++)
+            {
+                int index = i;
+                Task.Run(() => SeedList[index] = GetIpEndPoint(seedList[index]));
             }
         }
 
         /// <summary>
         /// Packs a MessageCommand to a full Message with an optional ISerializable payload.
-        /// Forwards it to <see cref="BroadcastMessage(Message message)"/>.
+        /// Forwards it to <see cref="BroadcastMessage(Message)"/>.
         /// </summary>
         /// <param name="command">The message command to be packed.</param>
         /// <param name="payload">Optional payload to be Serialized along the message.</param>
@@ -79,7 +100,7 @@ namespace Neo.Network.P2P
         }
 
         /// <summary>
-        /// Broadcast a message to all connected nodes, namely <see cref="Connections"/>.
+        /// Broadcast a message to all connected nodes.
         /// </summary>
         /// <param name="message">The message to be broadcasted.</param>
         private void BroadcastMessage(Message message) => SendToRemoteNodes(message);
@@ -128,14 +149,15 @@ namespace Neo.Network.P2P
         }
 
         /// <summary>
-        /// Check the new connection <br/>
-        /// If it is equal to the Nonce of local or any remote node, it'll return false, else we'll return true and update the Listener address of the connected remote node.
+        /// Checks the new connection.
+        /// If it is equal to the nonce of local or any remote node, it'll return false, else we'll return true and update the Listener address of the connected remote node.
         /// </summary>
-        /// <param name="actor">Remote node actor</param>
-        /// <param name="node">Remote node</param>
+        /// <param name="actor">Remote node actor.</param>
+        /// <param name="node">Remote node object.</param>
+        /// <returns><see langword="true"/> if the new connection is allowed; otherwise, <see langword="false"/>.</returns>
         public bool AllowNewConnection(IActorRef actor, RemoteNode node)
         {
-            if (node.Version.Magic != ProtocolSettings.Default.Magic) return false;
+            if (node.Version.Magic != system.Settings.Magic) return false;
             if (node.Version.Nonce == Nonce) return false;
 
             // filter duplicate connections
@@ -149,26 +171,33 @@ namespace Neo.Network.P2P
             return true;
         }
 
+        /// <summary>
+        /// Gets the connected remote nodes.
+        /// </summary>
+        /// <returns></returns>
         public IEnumerable<RemoteNode> GetRemoteNodes()
         {
             return RemoteNodes.Values;
         }
 
+        /// <summary>
+        /// Gets the unconnected nodes.
+        /// </summary>
+        /// <returns></returns>
         public IEnumerable<IPEndPoint> GetUnconnectedPeers()
         {
             return UnconnectedPeers;
         }
 
         /// <summary>
-        /// Override of abstract class that is triggered when <see cref="UnconnectedPeers"/> is empty.
-        /// Performs a BroadcastMessage with the command `MessageCommand.GetAddr`, which, eventually, tells all known connections.
-        /// If there are no connected peers it will try with the default, respecting MaxCountFromSeedList limit.
+        /// Performs a broadcast with the command <see cref="MessageCommand.GetAddr"/>, which, eventually, tells all known connections.
+        /// If there are no connected peers it will try with the default, respecting <see cref="MaxCountFromSeedList"/> limit.
         /// </summary>
-        /// <param name="count">The count of peers required</param>
+        /// <param name="count">Number of peers that are being requested.</param>
         protected override void NeedMorePeers(int count)
         {
             count = Math.Max(count, MaxCountFromSeedList);
-            if (ConnectedPeers.Count > 0)
+            if (!ConnectedPeers.IsEmpty)
             {
                 BroadcastMessage(MessageCommand.GetAddr);
             }
@@ -177,7 +206,7 @@ namespace Neo.Network.P2P
                 // Will call AddPeers with default SeedList set cached on <see cref="ProtocolSettings"/>.
                 // It will try to add those, sequentially, to the list of currently unconnected ones.
 
-                Random rand = new Random();
+                Random rand = new();
                 AddPeers(SeedList.Where(u => u != null).OrderBy(p => rand.Next()).Take(count));
             }
         }
@@ -195,6 +224,9 @@ namespace Neo.Network.P2P
                     break;
                 case SendDirectly send:
                     OnSendDirectly(send.Inventory);
+                    break;
+                case GetInstance _:
+                    Sender.Tell(this);
                     break;
             }
         }
@@ -223,6 +255,11 @@ namespace Neo.Network.P2P
             connection.Tell(new RemoteNode.StartProtocol());
         }
 
+        /// <summary>
+        /// Gets a <see cref="Akka.Actor.Props"/> object used for creating the <see cref="LocalNode"/> actor.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="LocalNode"/>.</param>
+        /// <returns>The <see cref="Akka.Actor.Props"/> object used for creating the <see cref="LocalNode"/> actor.</returns>
         public static Props Props(NeoSystem system)
         {
             return Akka.Actor.Props.Create(() => new LocalNode(system));
@@ -230,7 +267,7 @@ namespace Neo.Network.P2P
 
         protected override Props ProtocolProps(object connection, IPEndPoint remote, IPEndPoint local)
         {
-            return RemoteNode.Props(system, connection, remote, local);
+            return RemoteNode.Props(system, this, connection, remote, local);
         }
     }
 }

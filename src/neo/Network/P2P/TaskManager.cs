@@ -15,12 +15,26 @@ using System.Runtime.CompilerServices;
 
 namespace Neo.Network.P2P
 {
+    /// <summary>
+    /// Actor used to manage the tasks of inventories.
+    /// </summary>
     public class TaskManager : UntypedActor
     {
         internal class Register { public VersionPayload Version; }
         internal class Update { public uint LastBlockIndex; }
         internal class NewTasks { public InvPayload Payload; }
-        public class RestartTasks { public InvPayload Payload; }
+
+        /// <summary>
+        /// Sent to <see cref="TaskManager"/> to restart tasks for inventories.
+        /// </summary>
+        public class RestartTasks
+        {
+            /// <summary>
+            /// The inventories that need to restart.
+            /// </summary>
+            public InvPayload Payload { get; init; }
+        }
+
         private class Timer { }
 
         private static readonly TimeSpan TimerInterval = TimeSpan.FromSeconds(30);
@@ -34,17 +48,21 @@ namespace Neo.Network.P2P
         /// A set of known hashes, of inventories or payloads, already received.
         /// </summary>
         private readonly HashSetCache<UInt256> knownHashes;
-        private readonly Dictionary<UInt256, int> globalInvTasks = new Dictionary<UInt256, int>();
-        private readonly Dictionary<uint, int> globalIndexTasks = new Dictionary<uint, int>();
-        private readonly Dictionary<IActorRef, TaskSession> sessions = new Dictionary<IActorRef, TaskSession>();
+        private readonly Dictionary<UInt256, int> globalInvTasks = new();
+        private readonly Dictionary<uint, int> globalIndexTasks = new();
+        private readonly Dictionary<IActorRef, TaskSession> sessions = new();
         private readonly ICancelable timer = Context.System.Scheduler.ScheduleTellRepeatedlyCancelable(TimerInterval, TimerInterval, Context.Self, new Timer(), ActorRefs.NoSender);
 
         private bool HasHeaderTask => globalInvTasks.ContainsKey(HeaderTaskHash);
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="TaskManager"/> class.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="TaskManager"/>.</param>
         public TaskManager(NeoSystem system)
         {
             this.system = system;
-            this.knownHashes = new HashSetCache<UInt256>(Blockchain.Singleton.MemPool.Capacity * 2 / 5);
+            this.knownHashes = new HashSetCache<UInt256>(system.MemPool.Capacity * 2 / 5);
             Context.System.EventStream.Subscribe(Self, typeof(Blockchain.PersistCompleted));
             Context.System.EventStream.Subscribe(Self, typeof(Blockchain.RelayResult));
         }
@@ -72,15 +90,15 @@ namespace Neo.Network.P2P
                 return;
 
             // Do not accept payload of type InventoryType.TX if not synced on HeaderHeight
-            uint currentHeight = NativeContract.Ledger.CurrentIndex(Blockchain.Singleton.View);
-            uint headerHeight = Blockchain.Singleton.HeaderCache.Last?.Index ?? currentHeight;
+            uint currentHeight = NativeContract.Ledger.CurrentIndex(system.StoreView);
+            uint headerHeight = system.HeaderCache.Last?.Index ?? currentHeight;
             if (currentHeight < headerHeight && (payload.Type == InventoryType.TX || (payload.Type == InventoryType.Block && currentHeight < session.LastBlockIndex - InvPayload.MaxHashesCount)))
             {
                 RequestTasks(Sender, session);
                 return;
             }
 
-            HashSet<UInt256> hashes = new HashSet<UInt256>(payload.Hashes);
+            HashSet<UInt256> hashes = new(payload.Hashes);
             // Remove all previously processed knownHashes from the list that is being requested
             hashes.Remove(knownHashes);
             // Add to AvailableTasks the ones, of type InventoryType.Block, that are global (already under process by other sessions)
@@ -159,7 +177,7 @@ namespace Neo.Network.P2P
         private void OnRegister(VersionPayload version)
         {
             Context.Watch(Sender);
-            TaskSession session = new TaskSession(version);
+            TaskSession session = new(version);
             sessions.Add(Sender, session);
             RequestTasks(Sender, session);
         }
@@ -304,6 +322,11 @@ namespace Neo.Network.P2P
             base.PostStop();
         }
 
+        /// <summary>
+        /// Gets a <see cref="Akka.Actor.Props"/> object used for creating the <see cref="TaskManager"/> actor.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <see cref="TaskManager"/>.</param>
+        /// <returns>The <see cref="Akka.Actor.Props"/> object used for creating the <see cref="TaskManager"/> actor.</returns>
         public static Props Props(NeoSystem system)
         {
             return Akka.Actor.Props.Create(() => new TaskManager(system)).WithMailbox("task-manager-mailbox");
@@ -313,7 +336,7 @@ namespace Neo.Network.P2P
         {
             if (session.HasTooManyTasks) return;
 
-            DataCache snapshot = Blockchain.Singleton.View;
+            DataCache snapshot = system.StoreView;
 
             // If there are pending tasks of InventoryType.Block we should process them
             if (session.AvailableTasks.Count > 0)
@@ -321,7 +344,7 @@ namespace Neo.Network.P2P
                 session.AvailableTasks.Remove(knownHashes);
                 // Search any similar hash that is on Singleton's knowledge, which means, on the way or already processed
                 session.AvailableTasks.RemoveWhere(p => NativeContract.Ledger.ContainsBlock(snapshot, p));
-                HashSet<UInt256> hashes = new HashSet<UInt256>(session.AvailableTasks);
+                HashSet<UInt256> hashes = new(session.AvailableTasks);
                 if (hashes.Count > 0)
                 {
                     foreach (UInt256 hash in hashes.ToArray())
@@ -339,10 +362,10 @@ namespace Neo.Network.P2P
             }
 
             uint currentHeight = NativeContract.Ledger.CurrentIndex(snapshot);
-            uint headerHeight = Blockchain.Singleton.HeaderCache.Last?.Index ?? currentHeight;
+            uint headerHeight = system.HeaderCache.Last?.Index ?? currentHeight;
             // When the number of AvailableTasks is no more than 0, no pending tasks of InventoryType.Block, it should process pending the tasks of headers
             // If not HeaderTask pending to be processed it should ask for more Blocks
-            if ((!HasHeaderTask || globalInvTasks[HeaderTaskHash] < MaxConncurrentTasks) && headerHeight < session.LastBlockIndex && !Blockchain.Singleton.HeaderCache.Full)
+            if ((!HasHeaderTask || globalInvTasks[HeaderTaskHash] < MaxConncurrentTasks) && headerHeight < session.LastBlockIndex && !system.HeaderCache.Full)
             {
                 session.InvTasks[HeaderTaskHash] = DateTime.UtcNow;
                 IncrementGlobalTask(HeaderTaskHash);
@@ -397,7 +420,7 @@ namespace Neo.Network.P2P
 
         internal protected override bool ShallDrop(object message, IEnumerable queue)
         {
-            if (!(message is TaskManager.NewTasks tasks)) return false;
+            if (message is not TaskManager.NewTasks tasks) return false;
             // Remove duplicate tasks
             if (queue.OfType<TaskManager.NewTasks>().Any(x => x.Payload.Type == tasks.Payload.Type && x.Payload.Hashes.SequenceEqual(tasks.Payload.Hashes))) return true;
             return false;

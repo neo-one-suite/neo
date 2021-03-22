@@ -1,20 +1,46 @@
 using Neo.IO;
-using Neo.Ledger;
 using Neo.Persistence;
 using Neo.SmartContract;
 using Neo.SmartContract.Native;
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Neo.Network.P2P.Payloads
 {
+    /// <summary>
+    /// Represents an extensible message that can be relayed.
+    /// </summary>
     public class ExtensiblePayload : IInventory
     {
+        /// <summary>
+        /// The category of the extension.
+        /// </summary>
         public string Category;
+
+        /// <summary>
+        /// Indicates that the payload is only valid when the block height is greater than or equal to this value.
+        /// </summary>
         public uint ValidBlockStart;
+
+        /// <summary>
+        /// Indicates that the payload is only valid when the block height is less than this value.
+        /// </summary>
         public uint ValidBlockEnd;
+
+        /// <summary>
+        /// The sender of the payload.
+        /// </summary>
         public UInt160 Sender;
+
+        /// <summary>
+        /// The data of the payload.
+        /// </summary>
         public byte[] Data;
+
+        /// <summary>
+        /// The witness of the payload. It must match the <see cref="Sender"/>.
+        /// </summary>
         public Witness Witness;
 
         private UInt256 _hash = null;
@@ -67,7 +93,7 @@ namespace Neo.Network.P2P.Payloads
             ValidBlockEnd = reader.ReadUInt32();
             if (ValidBlockStart >= ValidBlockEnd) throw new FormatException();
             Sender = reader.ReadSerializable<UInt160>();
-            Data = reader.ReadVarBytes(ushort.MaxValue);
+            Data = reader.ReadVarBytes(Message.PayloadMaxSize);
         }
 
         UInt160[] IVerifiable.GetScriptHashesForVerifying(DataCache snapshot)
@@ -90,12 +116,12 @@ namespace Neo.Network.P2P.Payloads
             writer.WriteVarBytes(Data);
         }
 
-        public bool Verify(DataCache snapshot)
+        internal bool Verify(ProtocolSettings settings, DataCache snapshot, ISet<UInt160> extensibleWitnessWhiteList)
         {
             uint height = NativeContract.Ledger.CurrentIndex(snapshot);
             if (height < ValidBlockStart || height >= ValidBlockEnd) return false;
-            if (!Blockchain.Singleton.IsExtensibleWitnessWhiteListed(Sender)) return false;
-            return this.VerifyWitnesses(snapshot, 0_02000000);
+            if (!extensibleWitnessWhiteList.Contains(Sender)) return false;
+            return this.VerifyWitnesses(settings, snapshot, 0_02000000);
         }
     }
 }

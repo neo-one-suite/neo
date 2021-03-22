@@ -4,7 +4,7 @@ using Akka.IO;
 using Neo.Cryptography;
 using Neo.IO;
 using Neo.IO.Actors;
-using Neo.Ledger;
+using Neo.IO.Caching;
 using Neo.Network.P2P.Capabilities;
 using Neo.Network.P2P.Payloads;
 using Neo.SmartContract.Native;
@@ -16,31 +16,65 @@ using System.Net;
 
 namespace Neo.Network.P2P
 {
+    /// <summary>
+    /// Represents a connection of the NEO network.
+    /// </summary>
     public partial class RemoteNode : Connection
     {
         internal class StartProtocol { }
         internal class Relay { public IInventory Inventory; }
 
         private readonly NeoSystem system;
-        private readonly Queue<Message> message_queue_high = new Queue<Message>();
-        private readonly Queue<Message> message_queue_low = new Queue<Message>();
+        private readonly LocalNode localNode;
+        private readonly Queue<Message> message_queue_high = new();
+        private readonly Queue<Message> message_queue_low = new();
         private DateTime lastSent = TimeProvider.Current.UtcNow;
         private readonly bool[] sentCommands = new bool[1 << (sizeof(MessageCommand) * 8)];
         private ByteString msg_buffer = ByteString.Empty;
         private bool ack = true;
+        private uint lastHeightSent = 0;
 
-        public IPEndPoint Listener => new IPEndPoint(Remote.Address, ListenerTcpPort);
+        /// <summary>
+        /// The address of the remote Tcp server.
+        /// </summary>
+        public IPEndPoint Listener => new(Remote.Address, ListenerTcpPort);
+
+        /// <summary>
+        /// The port listened by the remote Tcp server. If the remote node is not a server, this field is 0.
+        /// </summary>
         public int ListenerTcpPort { get; private set; } = 0;
+
+        /// <summary>
+        /// The <see cref="VersionPayload"/> sent by the remote node.
+        /// </summary>
         public VersionPayload Version { get; private set; }
+
+        /// <summary>
+        /// The index of the last block sent by the remote node.
+        /// </summary>
         public uint LastBlockIndex { get; private set; } = 0;
-        public uint LastHeightSent { get; private set; } = 0;
+
+        /// <summary>
+        /// Indicates whether the remote node is a full node.
+        /// </summary>
         public bool IsFullNode { get; private set; } = false;
 
-        public RemoteNode(NeoSystem system, object connection, IPEndPoint remote, IPEndPoint local)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="RemoteNode"/> class.
+        /// </summary>
+        /// <param name="system">The <see cref="NeoSystem"/> object that contains the <paramref name="localNode"/>.</param>
+        /// <param name="localNode">The <see cref="LocalNode"/> that manages the <see cref="RemoteNode"/>.</param>
+        /// <param name="connection">The underlying connection object.</param>
+        /// <param name="remote">The address of the remote node.</param>
+        /// <param name="local">The address of the local node.</param>
+        public RemoteNode(NeoSystem system, LocalNode localNode, object connection, IPEndPoint remote, IPEndPoint local)
             : base(connection, remote, local)
         {
             this.system = system;
-            LocalNode.Singleton.RemoteNodes.TryAdd(Self, this);
+            this.localNode = localNode;
+            this.knownHashes = new HashSetCache<UInt256>(system.MemPool.Capacity * 2 / 5);
+            this.sentHashes = new HashSetCache<UInt256>(system.MemPool.Capacity * 2 / 5);
+            localNode.RemoteNodes.TryAdd(Self, this);
         }
 
         /// <summary>
@@ -72,35 +106,16 @@ namespace Neo.Network.P2P
         /// <param name="message">The message to be added.</param>
         private void EnqueueMessage(Message message)
         {
-            bool is_single = false;
-            switch (message.Command)
+            bool is_single = message.Command switch
             {
-                case MessageCommand.Addr:
-                case MessageCommand.GetAddr:
-                case MessageCommand.GetBlocks:
-                case MessageCommand.GetHeaders:
-                case MessageCommand.Mempool:
-                case MessageCommand.Ping:
-                case MessageCommand.Pong:
-                    is_single = true;
-                    break;
-            }
-            Queue<Message> message_queue;
-            switch (message.Command)
+                MessageCommand.Addr or MessageCommand.GetAddr or MessageCommand.GetBlocks or MessageCommand.GetHeaders or MessageCommand.Mempool or MessageCommand.Ping or MessageCommand.Pong => true,
+                _ => false,
+            };
+            Queue<Message> message_queue = message.Command switch
             {
-                case MessageCommand.Alert:
-                case MessageCommand.Extensible:
-                case MessageCommand.FilterAdd:
-                case MessageCommand.FilterClear:
-                case MessageCommand.FilterLoad:
-                case MessageCommand.GetAddr:
-                case MessageCommand.Mempool:
-                    message_queue = message_queue_high;
-                    break;
-                default:
-                    message_queue = message_queue_low;
-                    break;
-            }
+                MessageCommand.Alert or MessageCommand.Extensible or MessageCommand.FilterAdd or MessageCommand.FilterClear or MessageCommand.FilterLoad or MessageCommand.GetAddr or MessageCommand.Mempool => message_queue_high,
+                _ => message_queue_low,
+            };
             if (!is_single || message_queue.All(p => p.Command != message.Command))
             {
                 message_queue.Enqueue(message);
@@ -134,8 +149,8 @@ namespace Neo.Network.P2P
                 case Message msg:
                     if (msg.Payload is PingPayload payload)
                     {
-                        if (payload.LastBlockIndex > LastHeightSent)
-                            LastHeightSent = payload.LastBlockIndex;
+                        if (payload.LastBlockIndex > lastHeightSent)
+                            lastHeightSent = payload.LastBlockIndex;
                         else if (msg.Command == MessageCommand.Ping)
                             break;
                     }
@@ -179,25 +194,25 @@ namespace Neo.Network.P2P
         {
             var capabilities = new List<NodeCapability>
             {
-                new FullNodeCapability(NativeContract.Ledger.CurrentIndex(Blockchain.Singleton.View))
+                new FullNodeCapability(NativeContract.Ledger.CurrentIndex(system.StoreView))
             };
 
-            if (LocalNode.Singleton.ListenerTcpPort > 0) capabilities.Add(new ServerCapability(NodeCapabilityType.TcpServer, (ushort)LocalNode.Singleton.ListenerTcpPort));
-            if (LocalNode.Singleton.ListenerWsPort > 0) capabilities.Add(new ServerCapability(NodeCapabilityType.WsServer, (ushort)LocalNode.Singleton.ListenerWsPort));
+            if (localNode.ListenerTcpPort > 0) capabilities.Add(new ServerCapability(NodeCapabilityType.TcpServer, (ushort)localNode.ListenerTcpPort));
+            if (localNode.ListenerWsPort > 0) capabilities.Add(new ServerCapability(NodeCapabilityType.WsServer, (ushort)localNode.ListenerWsPort));
 
-            SendMessage(Message.Create(MessageCommand.Version, VersionPayload.Create(LocalNode.Nonce, LocalNode.UserAgent, capabilities.ToArray())));
+            SendMessage(Message.Create(MessageCommand.Version, VersionPayload.Create(system.Settings.Magic, LocalNode.Nonce, LocalNode.UserAgent, capabilities.ToArray())));
         }
 
         protected override void PostStop()
         {
             timer.CancelIfNotNull();
-            LocalNode.Singleton.RemoteNodes.TryRemove(Self, out _);
+            localNode.RemoteNodes.TryRemove(Self, out _);
             base.PostStop();
         }
 
-        internal static Props Props(NeoSystem system, object connection, IPEndPoint remote, IPEndPoint local)
+        internal static Props Props(NeoSystem system, LocalNode localNode, object connection, IPEndPoint remote, IPEndPoint local)
         {
-            return Akka.Actor.Props.Create(() => new RemoteNode(system, connection, remote, local)).WithMailbox("remote-node-mailbox");
+            return Akka.Actor.Props.Create(() => new RemoteNode(system, localNode, connection, remote, local)).WithMailbox("remote-node-mailbox");
         }
 
         private void SendMessage(Message message)
@@ -223,44 +238,26 @@ namespace Neo.Network.P2P
 
         internal protected override bool IsHighPriority(object message)
         {
-            switch (message)
+            return message switch
             {
-                case Message msg:
-                    switch (msg.Command)
-                    {
-                        case MessageCommand.Extensible:
-                        case MessageCommand.FilterAdd:
-                        case MessageCommand.FilterClear:
-                        case MessageCommand.FilterLoad:
-                        case MessageCommand.Verack:
-                        case MessageCommand.Version:
-                        case MessageCommand.Alert:
-                            return true;
-                        default:
-                            return false;
-                    }
-                case Tcp.ConnectionClosed _:
-                case Connection.Close _:
-                case Connection.Ack _:
-                    return true;
-                default:
-                    return false;
-            }
+                Message msg => msg.Command switch
+                {
+                    MessageCommand.Extensible or MessageCommand.FilterAdd or MessageCommand.FilterClear or MessageCommand.FilterLoad or MessageCommand.Verack or MessageCommand.Version or MessageCommand.Alert => true,
+                    _ => false,
+                },
+                Tcp.ConnectionClosed _ or Connection.Close _ or Connection.Ack _ => true,
+                _ => false,
+            };
         }
 
         internal protected override bool ShallDrop(object message, IEnumerable queue)
         {
-            if (!(message is Message msg)) return false;
-            switch (msg.Command)
+            if (message is not Message msg) return false;
+            return msg.Command switch
             {
-                case MessageCommand.GetAddr:
-                case MessageCommand.GetBlocks:
-                case MessageCommand.GetHeaders:
-                case MessageCommand.Mempool:
-                    return queue.OfType<Message>().Any(p => p.Command == msg.Command);
-                default:
-                    return false;
-            }
+                MessageCommand.GetAddr or MessageCommand.GetBlocks or MessageCommand.GetHeaders or MessageCommand.Mempool => queue.OfType<Message>().Any(p => p.Command == msg.Command),
+                _ => false,
+            };
         }
     }
 }
