@@ -92,7 +92,7 @@ namespace Neo.Network.P2P
             disconnected = true;
             if (tcp != null)
             {
-                tcp.Tell(abort ? Tcp.Abort.Instance : Tcp.Close.Instance);
+                tcp.Tell(abort ? (Tcp.CloseCommand)Tcp.Abort.Instance : Tcp.Close.Instance);
             }
             else
             {

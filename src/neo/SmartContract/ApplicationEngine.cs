@@ -430,16 +430,24 @@ namespace Neo.SmartContract
         /// <param name="descriptor">The descriptor of the interoperable service.</param>
         protected virtual void OnSysCall(InteropDescriptor descriptor)
         {
+            Console.WriteLine($"{descriptor.Name}");
             ValidateCallFlags(descriptor.RequiredCallFlags);
             AddGas(descriptor.FixedPrice * exec_fee_factor);
 
             object[] parameters = new object[descriptor.Parameters.Count];
             for (int i = 0; i < parameters.Length; i++)
-                parameters[i] = Convert(Pop(), descriptor.Parameters[i]);
+            {
+                StackItem item = Pop();
+                InteropParameterDescriptor pd = descriptor.Parameters[i];
+                parameters[i] = Convert(item, pd);
+                Console.WriteLine($"Param name: {pd.Name}. Type: {pd.Type.ToString()}. Value: {item.ToJson()}");
+            }
 
             object returnValue = descriptor.Handler.Invoke(this, parameters);
             if (descriptor.Handler.ReturnType != typeof(void))
+            {
                 Push(Convert(returnValue));
+            }
         }
 
         protected override void PreExecuteInstruction()
