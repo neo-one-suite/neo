@@ -2,6 +2,10 @@ using Akka.Actor;
 using Akka.Event;
 using Neo.Plugins;
 using System.Text;
+using System;
+using System.IO;
+using System.Reflection;
+using Microsoft.Extensions.Configuration;
 
 namespace Neo
 {
@@ -43,9 +47,12 @@ namespace Neo
             if (!File.Exists(file))
             {
                 // EntryPoint folder
-                try {
+                try
+                {
                     file = Path.Combine(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location), configFile);
-                } catch {
+                }
+                catch
+                {
                     // do nothing
                 }
                 if (!File.Exists(file))
