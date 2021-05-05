@@ -194,7 +194,16 @@ namespace Neo.SmartContract.Native
                 if (list.Count == 0) engine.Snapshot.Delete(key);
 
                 //Mint GAS for oracle nodes
-                nodes ??= RoleManagement.GetDesignatedByRole(engine.Snapshot, Role.Oracle, engine.PersistingBlock.Index).Select(p => (Contract.CreateSignatureRedeemScript(p).ToScriptHash(), BigInteger.Zero)).ToArray();
+                try
+                {
+                    nodes ??= RoleManagement.GetDesignatedByRole(engine.Snapshot, Role.Oracle, engine.PersistingBlock.Index).Select(p => (Contract.CreateSignatureRedeemScript(p).ToScriptHash(), BigInteger.Zero)).ToArray();
+                }
+                catch (Exception e)
+                {
+                    nodes = new (UInt160 Account, BigInteger GAS)[0];
+                    Console.WriteLine("Error while getting nodes for Oracle reward:");
+                    Console.WriteLine(e.ToString());
+                }
                 if (nodes.Length > 0)
                 {
                     int index = (int)(response.Id % (ulong)nodes.Length);
