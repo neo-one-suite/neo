@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Neo.Cryptography.ECC;
+using Neo.Network.P2P.Payloads;
 using Neo.SmartContract.Native;
 using System;
 using System.Collections.Generic;
@@ -15,7 +16,7 @@ namespace Neo
         /// <summary>
         /// The magic number of the NEO network.
         /// </summary>
-        public uint Magic { get; init; }
+        public uint Network { get; init; }
 
         /// <summary>
         /// The address version of the NEO system.
@@ -53,6 +54,11 @@ namespace Neo
         public TimeSpan TimePerBlock => TimeSpan.FromMilliseconds(MillisecondsPerBlock);
 
         /// <summary>
+        /// The maximum increment of the <see cref="Transaction.ValidUntilBlock"/> field.
+        /// </summary>
+        public uint MaxValidUntilBlockIncrement => 86400000 / MillisecondsPerBlock;
+
+        /// <summary>
         /// Indicates the maximum number of transactions that can be contained in a block.
         /// </summary>
         public uint MaxTransactionsPerBlock { get; init; }
@@ -83,7 +89,7 @@ namespace Neo
         /// </summary>
         public static ProtocolSettings Default { get; } = new ProtocolSettings
         {
-            Magic = 0x4F454Eu,
+            Network = 0x4F454Eu,
             AddressVersion = 0x35,
             StandbyCommittee = new[]
             {
@@ -134,8 +140,7 @@ namespace Neo
                 [nameof(GasToken)] = new[] { 0u },
                 [nameof(PolicyContract)] = new[] { 0u },
                 [nameof(RoleManagement)] = new[] { 0u },
-                [nameof(OracleContract)] = new[] { 0u },
-                [nameof(NameService)] = new[] { 0u }
+                [nameof(OracleContract)] = new[] { 0u }
             }
         };
 
@@ -161,7 +166,7 @@ namespace Neo
         {
             return new ProtocolSettings
             {
-                Magic = section.GetValue("Magic", Default.Magic),
+                Network = section.GetValue("Network", Default.Network),
                 AddressVersion = section.GetValue("AddressVersion", Default.AddressVersion),
                 StandbyCommittee = section.GetSection("StandbyCommittee").Exists()
                     ? section.GetSection("StandbyCommittee").GetChildren().Select(p => ECPoint.Parse(p.Get<string>(), ECCurve.Secp256r1)).ToArray()

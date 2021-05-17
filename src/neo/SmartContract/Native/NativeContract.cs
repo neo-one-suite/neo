@@ -65,11 +65,6 @@ namespace Neo.SmartContract.Native
         /// </summary>
         public static OracleContract Oracle { get; } = new();
 
-        /// <summary>
-        /// Gets the instance of the <see cref="Native.NameService"/> class.
-        /// </summary>
-        public static NameService NameService { get; } = new();
-
         #endregion
 
         /// <summary>
@@ -147,7 +142,7 @@ namespace Neo.SmartContract.Native
                     Methods = descriptors.Select(p => p.Descriptor).ToArray()
                 },
                 Permissions = new[] { ContractPermission.DefaultPermission },
-                Trusts = WildcardContainer<UInt160>.Create(),
+                Trusts = WildcardContainer<ContractPermissionDescriptor>.Create(),
                 Extra = null
             };
             contractsList.Add(this);

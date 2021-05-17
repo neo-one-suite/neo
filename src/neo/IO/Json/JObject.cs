@@ -16,10 +16,12 @@ namespace Neo.IO.Json
         /// </summary>
         public static readonly JObject Null = null;
 
+        private readonly OrderedDictionary<string, JObject> properties = new();
+
         /// <summary>
         /// Gets or sets the properties of the JSON object.
         /// </summary>
-        public IDictionary<string, JObject> Properties { get; } = new OrderedDictionary<string, JObject>();
+        public IDictionary<string, JObject> Properties => properties;
 
         /// <summary>
         /// Gets or sets the properties of the JSON object.
@@ -38,6 +40,17 @@ namespace Neo.IO.Json
             {
                 Properties[name] = value;
             }
+        }
+
+        /// <summary>
+        /// Gets the property at the specified index.
+        /// </summary>
+        /// <param name="index">The zero-based index of the property to get.</param>
+        /// <returns>The property at the specified index.</returns>
+        public virtual JObject this[int index]
+        {
+            get => properties[index];
+            set => throw new NotSupportedException();
         }
 
         /// <summary>
@@ -286,6 +299,33 @@ namespace Neo.IO.Json
             writer.WriteEndObject();
         }
 
+        /// <summary>
+        /// Creates a copy of the current JSON object.
+        /// </summary>
+        /// <returns>A copy of the current JSON object.</returns>
+        public virtual JObject Clone()
+        {
+            var cloned = new JObject();
+
+            foreach (KeyValuePair<string, JObject> pair in Properties)
+            {
+                cloned[pair.Key] = pair.Value != null ? pair.Value.Clone() : Null;
+            }
+
+            return cloned;
+        }
+
+        public JArray JsonPath(string expr)
+        {
+            JObject[] objects = { this };
+            if (expr.Length == 0) return objects;
+            Queue<JPathToken> tokens = new(JPathToken.Parse(expr));
+            JPathToken first = tokens.Dequeue();
+            if (first.Type != JPathTokenType.Root) throw new FormatException();
+            JPathToken.ProcessJsonPath(ref objects, tokens);
+            return objects;
+        }
+
         public static implicit operator JObject(Enum value)
         {
             return (JString)value;
@@ -309,22 +349,6 @@ namespace Neo.IO.Json
         public static implicit operator JObject(string value)
         {
             return (JString)value;
-        }
-
-        /// <summary>
-        /// Creates a copy of the current JSON object.
-        /// </summary>
-        /// <returns>A copy of the current JSON object.</returns>
-        public virtual JObject Clone()
-        {
-            var cloned = new JObject();
-
-            foreach (KeyValuePair<string, JObject> pair in Properties)
-            {
-                cloned[pair.Key] = pair.Value != null ? pair.Value.Clone() : Null;
-            }
-
-            return cloned;
         }
     }
 }
